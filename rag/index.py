@@ -23,7 +23,7 @@ from .store import Store
 
 log = logging.getLogger("rag.index")
 
-INDEX_VERSION = "2"  # bump when chunking or stored fields change, to force a rebuild
+INDEX_VERSION = "3"  # bump when chunking or stored fields change, to force a rebuild
 COLLECTION = "documents_v2"
 
 
@@ -32,8 +32,9 @@ def _is_under(path: str, parent: str) -> bool:
 
 
 class Indexer:
-    def __init__(self, cfg: Config, embedder, reranker=None):
+    def __init__(self, cfg: Config, embedder, reranker=None, ocr=None):
         self.cfg = cfg
+        self.ocr = ocr
         self.embedder = embedder  # .embed_documents(list[str]), .embed_query(str), .signature
         self.reranker = reranker
         cfg.data_dir.mkdir(parents=True, exist_ok=True)
@@ -48,7 +49,7 @@ class Indexer:
 
         # Vectors and chunks from a different model / prefix / chunker are not comparable: rebuild.
         signature = "|".join([INDEX_VERSION, embedder.signature, str(cfg.chunk_chars), str(cfg.chunk_overlap),
-                              str(cfg.code_chunk_chars)])
+                              str(cfg.code_chunk_chars), f"ocr={bool(ocr and ocr.enabled)}"])
         previous = self.store.meta("signature")
         if previous != signature:
             if previous:
@@ -121,7 +122,8 @@ class Indexer:
                     return "unchanged"
                 root = self._root_of(key)
                 label = root.name if root.is_file() else f"{root.name}/{real.relative_to(root).as_posix()}"
-                chunks = build_chunks(real, self.cfg.chunk_chars, self.cfg.chunk_overlap, self.cfg.code_chunk_chars)
+                chunks = build_chunks(real, self.cfg.chunk_chars, self.cfg.chunk_overlap, self.cfg.code_chunk_chars,
+                                      self.ocr)
                 # A one-line "where am I" header is embedded with each chunk so it keeps its context.
                 vectors = self._embed_documents(
                     [f"File: {label}{SEP + h if h else ''}\n\n{t}" for h, t in chunks]) if chunks else []
@@ -274,5 +276,6 @@ class Indexer:
             "extensions": exts,
             "mode": self.cfg.retrieval_mode if self.store.fts else "dense",
             "reranker": bool(self.reranker and self.reranker.enabled),
+            "ocr": bool(self.ocr and self.ocr.enabled),
             "events": list(self.events)[:15],
         }

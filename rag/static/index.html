@@ -55,7 +55,9 @@
   <select id="fExt" aria-label="File type filter"><option value="">All types</option></select>
   <button id="actBtn" type="button">Activity</button>
   <button id="rescan" type="button">Rescan</button>
+  <select id="chats" aria-label="Saved chats"><option value="">Saved chats</option></select>
   <button id="clear" type="button">New chat</button>
+  <button id="del" type="button" hidden>Delete</button>
 </header>
 <div id="activity"></div>
 <main><div class="wrap" id="chat"></div></main>
@@ -66,11 +68,11 @@
 <script>
 const $ = id => document.getElementById(id);
 const chat = $('chat');
-let history = [];
+let history = [], conversationId = null;
 const HINT = 'Ask anything about the files in your allowed folders.\nEdits, new files and deletions are picked up automatically.';
 
 function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text) e.textContent = text; return e; }
-function reset() { history = []; chat.textContent = ''; const h = el('p', 'hint', HINT); h.style.whiteSpace = 'pre-line'; chat.append(h); }
+function reset() { history = []; conversationId = null; $('chats').value = ''; $('del').hidden = true; chat.textContent = ''; const h = el('p', 'hint', HINT); h.style.whiteSpace = 'pre-line'; chat.append(h); }
 reset();
 
 let token = '';
@@ -118,6 +120,54 @@ $('actBtn').onclick = () => $('activity').classList.toggle('open');
 $('rescan').onclick = async () => { await api('/api/rescan', {method:'POST'}); refresh(); };
 $('clear').onclick = reset;
 
+function addSources(bot, sources, abstain) {
+  if (!sources || !sources.length) return;
+  const d = el('details'); d.append(el('summary', '', (abstain ? 'Closest matches' : 'Sources') + ` (${sources.length})`));
+  const ul = el('ul');
+  for (const s of sources) {
+    const li = el('li');
+    li.append(el('b', '', `[${s.n}] ${s.name}${s.heading ? ' › ' + s.heading : ''} `), `${s.path} · score ${s.score}`, el('pre', '', s.preview));
+    ul.append(li);
+  }
+  d.append(ul); bot.append(d);
+}
+
+async function loadChats() {
+  try {
+    const list = await (await api('/api/conversations')).json();
+    const sel = $('chats'); sel.textContent = '';
+    sel.append(new Option('Saved chats', ''));
+    for (const c of list) sel.append(new Option(c.title, c.id));
+    sel.value = conversationId || '';
+    sel.hidden = !list.length;
+  } catch {}
+}
+loadChats();
+
+$('chats').onchange = async () => {
+  const id = $('chats').value;
+  if (!id) return reset();
+  const res = await api('/api/conversations/' + id);
+  if (!res.ok) { reset(); return loadChats(); }
+  const messages = await res.json();
+  reset(); chat.textContent = '';
+  conversationId = id; $('chats').value = id; $('del').hidden = false;
+  for (const m of messages) {
+    const box = el('div', 'msg ' + (m.role === 'user' ? 'user' : 'bot'));
+    box.append(el('span', '', m.content));
+    if (m.role !== 'user') addSources(box, m.sources, m.abstain);
+    chat.append(box);
+    history.push({role: m.role, content: m.content});
+  }
+  chat.lastChild?.scrollIntoView({block: 'end'});
+};
+
+$('del').onclick = async () => {
+  if (!conversationId) return;
+  await api('/api/conversations/' + conversationId, {method: 'DELETE'});
+  reset(); loadChats();
+};
+
 $('q').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); $('form').requestSubmit(); } });
 
 $('form').addEventListener('submit', async e => {
@@ -132,7 +182,7 @@ $('form').addEventListener('submit', async e => {
   const filters = {roots: $('fRoot').value ? [$('fRoot').value] : [], exts: $('fExt').value ? [$('fExt').value] : []};
   try {
     const res = await api('/api/chat', {method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({question, history, filters})});
+      body: JSON.stringify({question, history, filters, conversation_id: conversationId})});
     if (!res.ok) throw new Error('Request failed (' + res.status + ')');
     const reader = res.body.getReader(), dec = new TextDecoder(); let buf = '';
     for (;;) {
@@ -142,7 +192,8 @@ $('form').addEventListener('submit', async e => {
       for (const line of lines) {
         if (!line) continue;
         const m = JSON.parse(line);
-        if (m.type === 'sources') {
+        if (m.type === 'conversation') { conversationId = m.id; $('del').hidden = false; }
+        else if (m.type === 'sources') {
           sources = m.sources; abstain = m.abstain;
           if (m.query && m.query !== question) bot.prepend(el('span', 'note', 'Searched for: ' + m.query));
         }
@@ -152,17 +203,9 @@ $('form').addEventListener('submit', async e => {
       bot.scrollIntoView({block: 'end'});
     }
   } catch (err) { text.className = 'err'; text.textContent = String(err); }
-  if (sources.length) {
-    const d = el('details'); d.append(el('summary', '', (abstain ? 'Closest matches' : 'Sources') + ` (${sources.length})`));
-    const ul = el('ul');
-    for (const s of sources) {
-      const li = el('li');
-      li.append(el('b', '', `[${s.n}] ${s.name}${s.heading ? ' › ' + s.heading : ''} `), `${s.path} · score ${s.score}`, el('pre', '', s.preview));
-      ul.append(li);
-    }
-    d.append(ul); bot.append(d);
-  }
+  addSources(bot, sources, abstain);
   if (answer) history.push({role:'user', content: question}, {role:'assistant', content: answer});
+  loadChats();
   $('send').disabled = false; $('q').focus();
 });
 </script>
