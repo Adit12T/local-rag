@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Local RAG</title>
+<style>
+  :root { --bg:#f6f5f1; --panel:#fff; --ink:#1d1d1b; --muted:#6d6b65; --line:#e2dfd6; --accent:#1f5f4a; --user:#e7efe9; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#161715; --panel:#1f211e; --ink:#ecebe6; --muted:#9a988f; --line:#33352f; --accent:#7fc7a8; --user:#26342d; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.55 system-ui, sans-serif; background:var(--bg); color:var(--ink);
+         display:flex; flex-direction:column; height:100dvh; }
+  header { padding:10px 16px; border-bottom:1px solid var(--line); background:var(--panel);
+           display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  header h1 { font-size:16px; margin:0; }
+  #stat { color:var(--muted); font-size:13px; flex:1; min-width:180px; }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--accent); margin-right:6px; }
+  .dot.busy { animation:pulse 1s infinite; }
+  @keyframes pulse { 50% { opacity:.25; } }
+  button, select { font:inherit; border:1px solid var(--line); background:var(--panel); color:var(--ink);
+           border-radius:8px; padding:6px 10px; }
+  button { cursor:pointer; }
+  select { max-width:150px; font-size:13px; }
+  button.primary { background:var(--accent); color:var(--bg); border-color:var(--accent); }
+  button:disabled { opacity:.5; cursor:default; }
+  #activity { display:none; border-bottom:1px solid var(--line); background:var(--panel); padding:8px 16px;
+              font-size:13px; max-height:32dvh; overflow:auto; }
+  #activity.open { display:block; }
+  #activity div { color:var(--muted); overflow-wrap:anywhere; }
+  #activity b { color:var(--ink); font-weight:600; }
+  main { flex:1; overflow:auto; padding:16px; }
+  .wrap { max-width:780px; margin:0 auto; }
+  .msg { margin:0 0 14px; padding:10px 14px; border-radius:12px; white-space:pre-wrap; overflow-wrap:anywhere; }
+  .user { background:var(--user); margin-left:15%; }
+  .bot { background:var(--panel); border:1px solid var(--line); }
+  .err { color:#c0392b; }
+  .note { display:block; font-size:12px; color:var(--muted); margin-bottom:6px; white-space:normal; }
+  details { margin-top:10px; font-size:13px; color:var(--muted); white-space:normal; }
+  details li { margin:8px 0; overflow-wrap:anywhere; }
+  details pre { margin:4px 0 0; white-space:pre-wrap; font-size:12px; opacity:.85; }
+  .hint { color:var(--muted); text-align:center; margin-top:18dvh; }
+  form { padding:12px 16px; border-top:1px solid var(--line); background:var(--panel); }
+  form .wrap { display:flex; gap:8px; }
+  textarea { flex:1; font:inherit; color:var(--ink); background:var(--bg); border:1px solid var(--line);
+             border-radius:10px; padding:9px 12px; resize:none; height:44px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Local RAG</h1>
+  <span id="stat"><span class="dot"></span>connecting…</span>
+  <select id="fRoot" aria-label="Folder filter"><option value="">All folders</option></select>
+  <select id="fExt" aria-label="File type filter"><option value="">All types</option></select>
+  <button id="actBtn" type="button">Activity</button>
+  <button id="rescan" type="button">Rescan</button>
+  <button id="clear" type="button">New chat</button>
+</header>
+<div id="activity"></div>
+<main><div class="wrap" id="chat"></div></main>
+<form id="form"><div class="wrap">
+  <textarea id="q" placeholder="Ask about your files…" autofocus></textarea>
+  <button class="primary" id="send">Send</button>
+</div></form>
+<script>
+const $ = id => document.getElementById(id);
+const chat = $('chat');
+let history = [];
+const HINT = 'Ask anything about the files in your allowed folders.\nEdits, new files and deletions are picked up automatically.';
+
+function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text) e.textContent = text; return e; }
+function reset() { history = []; chat.textContent = ''; const h = el('p', 'hint', HINT); h.style.whiteSpace = 'pre-line'; chat.append(h); }
+reset();
+
+let token = '';
+try { token = localStorage.getItem('rag_token') || ''; } catch {}
+async function api(path, opts = {}) {
+  opts.headers = {...(opts.headers || {}), ...(token ? {Authorization: 'Bearer ' + token} : {})};
+  let res = await fetch(path, opts);
+  if (res.status === 401) {
+    token = prompt('Access token (auth_token in config.yaml):') || '';
+    try { localStorage.setItem('rag_token', token); } catch {}
+    opts.headers.Authorization = 'Bearer ' + token;
+    res = await fetch(path, opts);
+  }
+  return res;
+}
+
+function fill(select, values, label, show) {
+  const have = [...select.options].slice(1).map(o => o.value).join('|');
+  if (have === values.join('|')) return;
+  const current = select.value; select.textContent = '';
+  select.append(new Option(label, ''));
+  for (const v of values) select.append(new Option(show(v), v));
+  select.value = values.includes(current) ? current : '';
+}
+
+async function refresh() {
+  try {
+    const s = await (await api('/api/status')).json();
+    const stat = $('stat'); stat.textContent = '';
+    stat.append(el('span', 'dot' + (s.busy ? ' busy' : '')),
+      `${s.files} files · ${s.chunks} chunks · ${s.mode}${s.reranker ? ' + rerank' : ''}` + (s.busy ? ' · indexing…' : ''));
+    fill($('fRoot'), s.paths, 'All folders', p => p.split(/[\\/]/).filter(Boolean).pop());
+    fill($('fExt'), s.extensions, 'All types', e => e);
+    const act = $('activity'); act.textContent = '';
+    act.append(el('div', '', 'Allowed paths: ' + s.paths.join(', ')));
+    if (!s.events.length) act.append(el('div', '', 'No changes yet.'));
+    for (const e of s.events) {
+      const row = el('div'); row.append(el('b', '', new Date(e.time * 1000).toLocaleTimeString() + ' ' + e.action + ' '),
+        e.path + (e.detail ? ' — ' + e.detail : '')); act.append(row);
+    }
+  } catch { $('stat').textContent = 'server not reachable'; }
+}
+setInterval(refresh, 4000); refresh();
+$('actBtn').onclick = () => $('activity').classList.toggle('open');
+$('rescan').onclick = async () => { await api('/api/rescan', {method:'POST'}); refresh(); };
+$('clear').onclick = reset;
+
+$('q').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); $('form').requestSubmit(); } });
+
+$('form').addEventListener('submit', async e => {
+  e.preventDefault();
+  const question = $('q').value.trim(); if (!question) return;
+  chat.querySelector('.hint')?.remove();
+  $('q').value = ''; $('send').disabled = true;
+  chat.append(el('div', 'msg user', question));
+  const bot = el('div', 'msg bot'), text = el('span', '', '…'); bot.append(text); chat.append(bot);
+  bot.scrollIntoView({block: 'end'});
+  let answer = '', sources = [], abstain = false;
+  const filters = {roots: $('fRoot').value ? [$('fRoot').value] : [], exts: $('fExt').value ? [$('fExt').value] : []};
+  try {
+    const res = await api('/api/chat', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({question, history, filters})});
+    if (!res.ok) throw new Error('Request failed (' + res.status + ')');
+    const reader = res.body.getReader(), dec = new TextDecoder(); let buf = '';
+    for (;;) {
+      const {done, value} = await reader.read(); if (done) break;
+      buf += dec.decode(value, {stream: true});
+      const lines = buf.split('\n'); buf = lines.pop();
+      for (const line of lines) {
+        if (!line) continue;
+        const m = JSON.parse(line);
+        if (m.type === 'sources') {
+          sources = m.sources; abstain = m.abstain;
+          if (m.query && m.query !== question) bot.prepend(el('span', 'note', 'Searched for: ' + m.query));
+        }
+        else if (m.type === 'token') { answer += m.text; text.textContent = answer; }
+        else if (m.type === 'error') { text.className = 'err'; text.textContent = m.text; }
+      }
+      bot.scrollIntoView({block: 'end'});
+    }
+  } catch (err) { text.className = 'err'; text.textContent = String(err); }
+  if (sources.length) {
+    const d = el('details'); d.append(el('summary', '', (abstain ? 'Closest matches' : 'Sources') + ` (${sources.length})`));
+    const ul = el('ul');
+    for (const s of sources) {
+      const li = el('li');
+      li.append(el('b', '', `[${s.n}] ${s.name}${s.heading ? ' › ' + s.heading : ''} `), `${s.path} · score ${s.score}`, el('pre', '', s.preview));
+      ul.append(li);
+    }
+    d.append(ul); bot.append(d);
+  }
+  if (answer) history.push({role:'user', content: question}, {role:'assistant', content: answer});
+  $('send').disabled = false; $('q').focus();
+});
+</script>
+</body>
+</html>
