@@ -1,0 +1,56 @@
+# The ONLY places the RAG is allowed to read. Folders are read recursively;
+# you can also list individual files. Nothing outside these paths is touched.
+paths:
+  - ~/Documents/notes
+  # - ~/projects/my-service
+  # - ~/Desktop/important.pdf
+
+# File types to index (anything else is ignored).
+extensions: [.txt, .md, .rst, .pdf, .docx, .csv, .json, .yaml, .yml, .xml,
+             .html, .java, .kt, .py, .js, .ts, .tsx, .sql, .properties,
+             .gradle, .sh, .edi, .log]
+
+# Folder / file names skipped anywhere in the tree.
+ignore: [.git, .idea, .vscode, node_modules, target, build, dist,
+         __pycache__, .venv, venv, .DS_Store]
+
+max_file_mb: 20          # bigger files are skipped
+
+# ---- Ollama (everything runs on your machine) ----
+ollama_url: http://localhost:11434
+embed_model: nomic-embed-text   # task prefixes for nomic / mxbai / qwen3-embedding are applied automatically
+chat_model: llama3.2            # any chat model you have pulled
+num_ctx: 8192                   # context window sent to Ollama, so sources + history are not cut off
+temperature: 0.1
+
+# ---- Chunking (changing these rebuilds the index) ----
+chunk_chars: 1200        # prose, about 300 tokens
+chunk_overlap: 150
+code_chunk_chars: 2400   # code and config files; keeps whole functions together
+
+# ---- Retrieval ----
+retrieval_mode: hybrid   # hybrid (keywords + vectors) | dense | keyword
+candidates: 30           # taken from each retriever before fusion / reranking
+rrf_k: 60                # reciprocal rank fusion constant
+top_k: 6                 # chunks sent to the model
+max_per_file: 3          # at most this many chunks from a single file
+rerank: auto             # auto = use the reranker if installed | on | off
+rerank_model: ms-marco-MiniLM-L-12-v2
+rerank_min_score: 0.01   # with reranker: answer "not found" if the best score is below this
+min_dense_score: 0.25    # without reranker: "not found" if no keyword hit and similarity below this
+
+# ---- Chat ----
+rewrite_queries: true    # rewrite follow-up questions into standalone search queries
+history_turns: 6
+log_queries: true        # writes rag_data/queries.jsonl (question, retrieved chunks, scores, answer)
+
+# ---- Auto-update ----
+debounce_seconds: 1.5    # wait for a file to stop changing before re-indexing
+rescan_minutes: 10       # safety-net full rescan (catches missed events, e.g. network drives)
+
+# ---- Server ----
+data_dir: ./rag_data
+host: 127.0.0.1          # keep on loopback unless you set auth_token
+port: 8000
+auth_token: ""           # if set, the UI asks for it and every API call must send it
+# allowed_hosts: [my-laptop.local]   # extra Host names to accept

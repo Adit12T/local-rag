@@ -1,0 +1,6 @@
+# Replace these with 20-50 real questions about your own files.
+# `expect` is any substring of the path of the file that contains the answer.
+- question: What is the Kafka retention for the orders topic?
+  expect: kafka.md
+- question: Which database does billing run on?
+  expect: db.txt
