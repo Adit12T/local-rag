@@ -221,7 +221,37 @@ def main():
     assert secured.get("/api/status", headers={"Authorization": "Bearer s3cret"}).status_code == 200
     assert secured.get("/").status_code == 200
 
+    test_indexing_failure_is_reported()
     print("ALL TESTS PASSED")
+
+
+def test_indexing_failure_is_reported():
+    """When the embedder is down, the chat says why nothing is indexed instead of 'no files'."""
+    class DownLLM(FakeLLM):
+        def embed_documents(self, texts):
+            raise RuntimeError("Cannot reach Ollama at http://localhost:11434. Is it running?")
+
+    tmp = Path(tempfile.mkdtemp()).resolve()
+    try:
+        docs = tmp / "docs"
+        docs.mkdir()
+        (docs / "a.md").write_text("# Note\nThe standup is at 9:45.\n")
+        cfg = Config(paths=[docs], extensions={".md"}, ignore=set(), data_dir=tmp / "data", rerank="off")
+        app = create_app(cfg, DownLLM(), watch=False)
+        assert app.state.indexer.sync()["skipped"] == 1
+        client = TestClient(app, base_url="http://localhost")
+        status = client.get("/api/status").json()
+        assert status["files"] == 0 and status["events"][0]["action"] == "error"
+        lines = [json.loads(line) for line in
+                 client.post("/api/chat", json={"question": "when is standup?"}).text.splitlines()]
+        assert lines[1]["text"].startswith("Nothing is indexed yet because indexing failed: Cannot reach Ollama")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_end_to_end():
+    """Lets `pytest` run the full scenario, not only the chunker test."""
+    main()
 
 
 if __name__ == "__main__":
