@@ -20,6 +20,7 @@ import yaml
 from .__main__ import make_llm
 from .config import load_config
 from .index import Indexer
+from .ocr import Ocr
 from .reranker import Reranker
 
 
@@ -52,7 +53,8 @@ def main():
 
     cfg = load_config(args.config)
     golden = yaml.safe_load(Path(args.golden).read_text())
-    indexer = Indexer(cfg, make_llm(cfg), Reranker(cfg.rerank_model, str(cfg.data_dir / "models"), cfg.rerank))
+    indexer = Indexer(cfg, make_llm(cfg), Reranker(cfg.rerank_model, str(cfg.data_dir / "models"), cfg.rerank),
+                      Ocr(cfg.ocr))
     print("Syncing index:", indexer.sync())
 
     runs = [("dense", False), ("keyword", False), ("hybrid", False)]

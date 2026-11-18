@@ -12,9 +12,11 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from .chats import ChatStore
 from .config import Config
 from .index import Indexer
 from .loaders import SEP
+from .ocr import Ocr
 from .reranker import Reranker
 from .watcher import Watcher
 
@@ -52,12 +54,14 @@ class Filters(BaseModel):
 class ChatRequest(BaseModel):
     question: str
     history: list[dict] = []
+    conversation_id: str | None = None
     filters: Filters = Filters()
 
 
 def create_app(cfg: Config, llm, watch: bool = True) -> FastAPI:
     reranker = Reranker(cfg.rerank_model, str(cfg.data_dir / "models"), cfg.rerank)
-    indexer = Indexer(cfg, llm, reranker)
+    indexer = Indexer(cfg, llm, reranker, Ocr(cfg.ocr))
+    chats = ChatStore(cfg.data_dir / "chats.sqlite") if cfg.save_chats else None
     watcher = Watcher(indexer)
     log_lock = threading.Lock()
 
@@ -135,20 +139,43 @@ def create_app(cfg: Config, llm, watch: bool = True) -> FastAPI:
         """Retrieval only, with per-retriever scores: for debugging and tuning."""
         return indexer.search(q, k=k, mode=mode)
 
+    @app.get("/api/conversations")
+    def conversations():
+        return chats.recent() if chats else []
+
+    @app.get("/api/conversations/{cid}")
+    def conversation(cid: str):
+        if not chats or not chats.exists(cid):
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return chats.messages(cid)
+
+    @app.delete("/api/conversations/{cid}")
+    def delete_conversation(cid: str):
+        if chats:
+            chats.delete(cid)
+        return {"deleted": True}
+
     @app.post("/api/chat")
     def chat(req: ChatRequest):
         def stream():
             t0, answer = time.time(), ""
+            cid, past = req.conversation_id, req.history
+            if chats and cid and chats.exists(cid):
+                past = chats.messages(cid)  # the saved conversation is the source of truth
             history = [{"role": m["role"], "content": str(m.get("content", ""))[:2000]}
-                       for m in req.history[-cfg.history_turns * 2:] if m.get("role") in ("user", "assistant")]
+                       for m in past[-cfg.history_turns * 2:] if m.get("role") in ("user", "assistant")]
             try:
+                if chats:
+                    if not (cid and chats.exists(cid)):
+                        cid = chats.create(req.question)
+                    yield json.dumps({"type": "conversation", "id": cid}) + "\n"
                 query = rewrite(req.question, history)
                 result = indexer.search(query, roots=req.filters.roots or None, exts=req.filters.exts or None)
                 hits = result["hits"]
+                sources = [{"n": i + 1, "name": h["name"], "path": h["source"], "heading": h["heading"],
+                            "score": h["score"], "preview": h["text"][:400]} for i, h in enumerate(hits)]
                 yield json.dumps({"type": "sources", "query": query, "abstain": result["abstain"],
-                                  "trace": result["trace"], "sources": [
-                    {"n": i + 1, "name": h["name"], "path": h["source"], "heading": h["heading"],
-                     "score": h["score"], "preview": h["text"][:400]} for i, h in enumerate(hits)]}) + "\n"
+                                  "trace": result["trace"], "sources": sources}) + "\n"
                 if result["abstain"]:
                     status = indexer.status()
                     failure = next((e["detail"] for e in status["events"] if e["action"] == "error"), "")
@@ -166,6 +193,10 @@ def create_app(cfg: Config, llm, watch: bool = True) -> FastAPI:
                     for piece in llm.chat_stream(messages):
                         answer += piece
                         yield json.dumps({"type": "token", "text": piece}) + "\n"
+                if chats:
+                    chats.add(cid, "user", req.question)
+                    chats.add(cid, "assistant", answer, {"sources": sources, "abstain": result["abstain"],
+                                                         "query": query})
                 yield json.dumps({"type": "done"}) + "\n"
                 log_query({"time": t0, "question": req.question, "query": query, "abstain": result["abstain"],
                            "trace": result["trace"], "total_ms": round((time.time() - t0) * 1000),

@@ -35,11 +35,13 @@ class Config:
     rerank_model: str = "ms-marco-MiniLM-L-12-v2"
     rerank_min_score: float = 0.01          # abstain below this (reranker installed)
     min_dense_score: float = 0.25           # abstain below this when there is no keyword hit (no reranker)
+    ocr: str = "auto"                       # auto | on | off (scanned PDF pages)
 
     # Chat
     rewrite_queries: bool = True
     history_turns: int = 6
     log_queries: bool = True
+    save_chats: bool = True
 
     # Auto-update
     debounce_seconds: float = 1.5
@@ -71,6 +73,7 @@ def load_config(path: str = "config.yaml") -> Config:
     cfg = Config(paths=paths, extensions=exts, ignore=ignore, **raw)
     if cfg.retrieval_mode not in ("hybrid", "dense", "keyword"):
         raise SystemExit("retrieval_mode must be hybrid, dense or keyword")
-    if cfg.rerank not in ("auto", "on", "off"):
-        raise SystemExit("rerank must be auto, on or off")
+    for name in ("rerank", "ocr"):
+        if getattr(cfg, name) not in ("auto", "on", "off"):
+            raise SystemExit(f"{name} must be auto, on or off")
     return cfg

@@ -1,0 +1,4 @@
+# Optional: OCR for scanned PDFs. Models are bundled in the package; nothing is downloaded at run time.
+rapidocr-onnxruntime>=1.2,<2
+pypdfium2>=4
+numpy

@@ -39,9 +39,13 @@ rerank_model: ms-marco-MiniLM-L-12-v2
 rerank_min_score: 0.01   # with reranker: answer "not found" if the best score is below this
 min_dense_score: 0.25    # without reranker: "not found" if no keyword hit and similarity below this
 
+# ---- Scanned PDFs ----
+ocr: auto                # auto = OCR pages without a text layer if the OCR packages are installed | on | off
+
 # ---- Chat ----
 rewrite_queries: true    # rewrite follow-up questions into standalone search queries
 history_turns: 6
+save_chats: true         # keep conversations in rag_data/chats.sqlite
 log_queries: true        # writes rag_data/queries.jsonl (question, retrieved chunks, scores, answer)
 
 # ---- Auto-update ----

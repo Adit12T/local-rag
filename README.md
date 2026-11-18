@@ -14,8 +14,11 @@ Chat with the files in folders you choose. Everything runs on your machine
   the conversation, and the rewritten query is shown in the UI.
 - **"Not found" instead of guessing**: when nothing retrieved looks relevant, the model is not
   called and the closest matches are listed.
-- **Structure-aware chunking**: Markdown by heading, Python by function/class, PDF by page, Word
-  by heading style. Each chunk is embedded with a `File: path › Section` header so it keeps its context.
+- **Structure-aware chunking**: Markdown by heading, Python by function/class, Java, Kotlin,
+  JS/TS, C#, Go, C/C++ and Rust by type and method (`class OrderService › cancelExpiredOrders()`),
+  PDF by page, Word by heading style. Each chunk is embedded with a `File: path › Section`
+  header so it keeps its context.
+- **Optional OCR** for scanned PDF pages (RapidOCR, fully local; only pages without a text layer are OCR'd).
 - **Correct embedding prefixes** for nomic-embed-text, mxbai-embed-large and qwen3-embedding.
 - **Filters** by folder and file type, and at most `max_per_file` chunks from one file.
 
@@ -25,6 +28,10 @@ Chat with the files in folders you choose. Everything runs on your machine
 - Content-hash change detection and an embedding cache: unchanged text is never re-embedded,
   so renames and restarts are cheap.
 - The keyword index and file manifest change in one transaction; an interrupted update is repaired on the next sync.
+
+**Chat**
+- Conversations are saved (`rag_data/chats.sqlite`) and can be reopened or deleted from the UI.
+  Set `save_chats: false` to keep nothing.
 
 **Safety and operations**
 - Sources are passed to the model as delimited, untrusted data, with instructions not to follow anything written inside them.
@@ -49,6 +56,7 @@ Chat with the files in folders you choose. Everything runs on your machine
    source .venv/bin/activate        # Windows: .venv\Scripts\activate
    pip install -r requirements.txt
    pip install -r requirements-rerank.txt   # optional: reranker (downloads a ~34 MB model once)
+   pip install -r requirements-ocr.txt      # optional: OCR for scanned PDFs (models are bundled)
    ```
 
 3. Edit `config.yaml` and list the folders/files it may read under `paths:`.
@@ -107,6 +115,7 @@ All settings are in `config.yaml`, with comments. The ones that matter most:
 | `retrieval_mode` | `hybrid` | `dense` or `keyword` to compare |
 | `candidates` / `top_k` | 30 / 6 | Pool per retriever / chunks sent to the model |
 | `rerank` | `auto` | Uses the reranker when `flashrank` is installed |
+| `ocr` | `auto` | OCRs scanned PDF pages when the OCR packages are installed; installing them rebuilds the index |
 | `rerank_min_score`, `min_dense_score` | 0.01, 0.25 | "Not found" thresholds. Starting values: calibrate them with the eval script |
 | `chunk_chars` / `code_chunk_chars` | 1200 / 2400 | Changing these rebuilds the index |
 | `embed_model`, `chat_model` | `nomic-embed-text`, `llama3.2` | Any models you have pulled; a new embedding model rebuilds the index |
@@ -128,10 +137,11 @@ number to set the "not found" threshold below.
 
 ## Limits
 
-- Scanned PDFs are not OCR'd; they show up in Activity as "no extractable text".
-- Code other than Python is split by size at blank lines, not by function.
-- Chats are kept in the browser tab only and are gone on reload.
-- The reranker model is English-centric.
+- Without the OCR packages, scanned PDFs show up in Activity as "no extractable text". OCR covers
+  PDFs only (not standalone image files) and is slow on large scans (roughly a second or more per page on CPU).
+- The brace-language splitter is a lightweight scanner, not a parser. If a file's braces do not
+  balance by its rules, that file falls back to size-based splitting.
+- The reranker and the default OCR models are English-centric.
 
 ## Test
 
@@ -144,8 +154,10 @@ watcher, the API and the security checks end to end with a fake model (no Ollama
 config.yaml            allowed paths and settings
 rag/index.py           incremental indexer, hybrid retrieval, fusion, abstention
 rag/store.py           SQLite: file manifest, FTS5 keyword index, embedding cache
-rag/loaders.py         text extraction and structure-aware chunking
+rag/loaders.py         text extraction and structure-aware chunking (Markdown, Python, brace languages)
 rag/reranker.py        optional FlashRank reranker
+rag/ocr.py             optional OCR for scanned PDF pages
+rag/chats.py           saved conversations
 rag/ollama_client.py   embeddings (with task prefixes), streaming chat, structured output
 rag/watcher.py         file watcher, debounce, periodic rescan
 rag/server.py          FastAPI app: chat, query rewriting, security, query log
