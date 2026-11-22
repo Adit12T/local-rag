@@ -29,6 +29,7 @@ from rag.watcher import Watcher  # noqa: E402
 class FakeLLM:
     """Bag-of-words 'embeddings': related texts share words, so they land close together."""
     signature = "fake"
+    chat_model = "llama3.2"  # a small model: planner and verifier stay in their cheap 'auto' modes
 
     def __init__(self):
         self.embedded = 0
@@ -54,8 +55,10 @@ class FakeLLM:
         yield "stub answer [1]"
 
     def chat_json(self, messages, schema):
-        self.rewrites.append(messages[-1]["content"])
-        return {"query": "kafka retention orders topic"}
+        if set(schema.get("properties", {})) == {"query"}:  # the follow-up rewrite
+            self.rewrites.append(messages[-1]["content"])
+            return {"query": "kafka retention orders topic"}
+        return {}
 
 
 def wait_for(cond, timeout=10):
@@ -239,7 +242,7 @@ def main():
 
     def ask(question, history=()):
         r = client.post("/api/chat", json={"question": question, "history": list(history)})
-        return [json.loads(line) for line in r.text.splitlines()]
+        return [m for m in map(json.loads, r.text.splitlines()) if m["type"] != "step"]
 
     lines = ask("kafka retention")
     assert lines[0]["type"] == "conversation"
@@ -252,7 +255,7 @@ def main():
 
     # follow-up in the saved conversation: history comes from the server, and the question is rewritten
     r = client.post("/api/chat", json={"question": "and how long is it?", "conversation_id": cid})
-    lines = [json.loads(line) for line in r.text.splitlines()]
+    lines = [m for m in map(json.loads, r.text.splitlines()) if m["type"] != "step"]
     assert lines[0] == {"type": "conversation", "id": cid}
     assert len(llm.rewrites) == 1 and "kafka retention" in llm.rewrites[0]
     assert lines[1]["query"] == "kafka retention orders topic" and lines[1]["sources"][0]["name"] == "kafka.md"
@@ -304,7 +307,8 @@ def test_indexing_failure_is_reported():
         assert status["files"] == 0 and status["events"][0]["action"] == "error"
         lines = [json.loads(line) for line in
                  client.post("/api/chat", json={"question": "when is standup?"}).text.splitlines()]
-        assert lines[1]["text"].startswith("Nothing is indexed yet because indexing failed: Cannot reach Ollama")
+        token = next(m["text"] for m in lines if m["type"] == "token")
+        assert token.startswith("Nothing is indexed yet because indexing failed: Cannot reach Ollama")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

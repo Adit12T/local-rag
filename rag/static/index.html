@@ -44,6 +44,13 @@
   .hint { color:var(--muted); text-align:center; margin-top:18dvh; }
   form { padding:12px 16px; border-top:1px solid var(--line); background:var(--panel); }
   form .wrap { display:flex; gap:8px; }
+  .steps li { margin:3px 0; }
+  .g-correct { color:#1f7a4d; } .g-ambiguous { color:#b7791f; } .g-incorrect { color:#c0392b; }
+  .unsup { text-decoration:underline dotted #c0392b; text-decoration-thickness:2px; text-underline-offset:3px; }
+  .wrongcite { text-decoration:underline dotted #b7791f; text-underline-offset:3px; }
+  .vnote { display:block; font-size:12px; color:var(--muted); margin-top:8px; white-space:normal; }
+  .webbtn { margin-top:10px; font-size:13px; }
+  .tag { font-size:11px; border:1px solid var(--line); border-radius:6px; padding:0 5px; margin-left:4px; }
   textarea { flex:1; font:inherit; color:var(--ink); background:var(--bg); border:1px solid var(--line);
              border-radius:10px; padding:9px 12px; resize:none; height:44px; }
 </style>
@@ -129,10 +136,63 @@ function addSources(bot, sources, abstain) {
   const ul = el('ul');
   for (const s of sources) {
     const li = el('li');
-    li.append(el('b', '', `[${s.n}] ${s.name}${s.heading ? ' › ' + s.heading : ''} `), `${s.path} · score ${s.score}`, el('pre', '', s.preview));
+    const b = el('b', '', `[${s.n}] ${s.name}${s.heading && !s.web ? ' › ' + s.heading : ''} `);
+    if (s.web) b.append(el('span', 'tag', 'web'));
+    if (s.expanded) b.append(el('span', 'tag', '+' + s.expanded + ' nearby'));
+    if (s.refined) b.append(el('span', 'tag', 'trimmed ' + s.refined));
+    li.append(b, ' ', s.web ? s.path : `${s.path} · score ${s.score}`, el('pre', '', s.preview));
     ul.append(li);
   }
   d.append(ul); bot.append(d);
+}
+
+function stepText(s) {
+  switch (s.stage) {
+    case 'route': return `Plan: ${s.route.replace('_', '-')}` + (s.sub_queries && s.sub_queries.length ? ` → ${s.sub_queries.map(q => '"' + q + '"').join(', ')}` : '') + (s.how === 'llm' ? '' : ` (${s.how})`);
+    case 'grade': return `Search "${s.query}": ${s.grade} (best ${s.best}, ${s.found} found)`;
+    case 'retry': return `Retry ${s.n}${s.hyde ? ' + HyDE' : ''}: ${s.queries.map(q => '"' + q + '"').join(', ')} → ${s.grade} (best ${s.best})`;
+    case 'round': return `Round ${s.n}: missing ${s.missing || '?'} → "${s.query}", ${s.new_chunks} new`;
+    case 'sufficient': return `Round ${s.n}: evidence is sufficient`;
+    case 'refine': return `Trimmed ${s.dropped} irrelevant sentence group${s.dropped === 1 ? '' : 's'} (kept ${s.kept})`;
+    case 'tool': return `Tool ${s.n}: ${s.tool}(${Object.values(s.args || {}).join(', ')})${s.ok ? '' : ' — refused/failed'}`;
+    case 'verify': return `Checking the answer against the sources (${s.backend})`;
+    case 'fallback': return `Fallback: ${s.reason}`;
+    case 'web': return `Web search: "${s.query}"`;
+    case 'web_error': return `Web search failed: ${s.detail}`;
+    default: return s.stage;
+  }
+}
+
+function stepsBox(bot) {
+  let d = bot.querySelector('details.steps');
+  if (!d) {
+    d = el('details', 'steps'); d.append(el('summary', '', 'Steps'), el('ul'));
+    const first = bot.querySelector('details'); first ? bot.insertBefore(d, first) : bot.append(d);
+  }
+  return d;
+}
+
+function addStep(bot, s) {
+  const d = stepsBox(bot), li = el('li', s.grade ? 'g-' + s.grade : '', stepText(s));
+  d.querySelector('ul').append(li);
+  d.querySelector('summary').textContent = `Steps (${d.querySelectorAll('li').length})`;
+}
+
+function showVerification(text, bot, v) {
+  if (!v || !v.segments) return;
+  text.textContent = '';
+  for (const seg of v.segments) {
+    const span = el('span', seg.s === false ? 'unsup' : (seg.fix ? 'wrongcite' : ''), seg.t);
+    if (seg.s === false) span.title = 'Not supported by the sources';
+    else if (seg.fix) span.title = 'Supported by ' + (seg.fix.length ? seg.fix.map(n => '[' + n + ']').join(' ') : 'other sources') + ', not the cited one';
+    text.append(span);
+  }
+  bot.querySelector('.vnote')?.remove();
+  const parts = [`Checked ${v.checked} sentence${v.checked === 1 ? '' : 's'}`];
+  parts.push(v.unsupported ? `${v.unsupported} not supported by the sources (underlined)` : 'all supported by the sources');
+  if (v.citation_errors) parts.push(`${v.citation_errors} cite the wrong source`);
+  const note = el('span', 'vnote', parts.join(' · '));
+  const after = bot.querySelector('details'); after ? bot.insertBefore(note, after) : bot.append(note);
 }
 
 async function loadChats() {
@@ -157,8 +217,12 @@ $('chats').onchange = async () => {
   conversationId = id; $('chats').value = id; $('del').hidden = false;
   for (const m of messages) {
     const box = el('div', 'msg ' + (m.role === 'user' ? 'user' : 'bot'));
-    box.append(el('span', '', m.content));
-    if (m.role !== 'user') addSources(box, m.sources, m.abstain);
+    const span = el('span', '', m.content); box.append(span);
+    if (m.role !== 'user') {
+      for (const st of m.steps || []) addStep(box, st);
+      addSources(box, m.sources, m.abstain);
+      if (m.verification) showVerification(span, box, m.verification);
+    }
     chat.append(box);
     history.push({role: m.role, content: m.content});
   }
@@ -173,20 +237,29 @@ $('del').onclick = async () => {
 
 $('q').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); $('form').requestSubmit(); } });
 
-$('form').addEventListener('submit', async e => {
+$('form').addEventListener('submit', e => {
   e.preventDefault();
   const question = $('q').value.trim(); if (!question) return;
+  $('q').value = '';
+  ask(question);
+});
+
+async function ask(question, webQuery) {
   chat.querySelector('.hint')?.remove();
-  $('q').value = ''; $('send').disabled = true;
-  chat.append(el('div', 'msg user', question));
+  $('send').disabled = true;
+  chat.append(el('div', 'msg user', webQuery ? `${question}\n(search the web for: ${webQuery})` : question));
   const bot = el('div', 'msg bot'), text = el('span', '', '…'); bot.append(text); chat.append(bot);
   bot.scrollIntoView({block: 'end'});
-  let answer = '', sources = [], abstain = false;
+  let answer = '', sources = [], abstain = false, offer = null, verification = null;
   const filters = {roots: $('fRoot').value ? [$('fRoot').value] : [], exts: $('fExt').value ? [$('fExt').value] : []};
   try {
-    const res = await api('/api/chat', {method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({question, history, filters, conversation_id: conversationId})});
-    if (!res.ok) throw new Error('Request failed (' + res.status + ')');
+    const body = {question, history, filters, conversation_id: conversationId};
+    if (webQuery) body.web_query = webQuery;
+    const res = await api('/api/chat', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    if (!res.ok) {
+      let detail = ''; try { detail = (await res.json()).error || ''; } catch {}
+      throw new Error('Request failed (' + res.status + ')' + (detail ? ': ' + detail : ''));
+    }
     const reader = res.body.getReader(), dec = new TextDecoder(); let buf = '';
     for (;;) {
       const {done, value} = await reader.read(); if (done) break;
@@ -196,21 +269,35 @@ $('form').addEventListener('submit', async e => {
         if (!line) continue;
         const m = JSON.parse(line);
         if (m.type === 'conversation') { conversationId = m.id; $('del').hidden = false; }
+        else if (m.type === 'step') addStep(bot, m);
         else if (m.type === 'sources') {
           sources = m.sources; abstain = m.abstain;
-          if (m.query && m.query !== question) bot.prepend(el('span', 'note', 'Searched for: ' + m.query));
+          if (m.query && m.query !== question && !webQuery) bot.prepend(el('span', 'note', 'Searched for: ' + m.query));
         }
         else if (m.type === 'token') { answer += m.text; text.textContent = answer; }
+        else if (m.type === 'revision') {
+          answer = m.text; text.textContent = answer;
+          bot.prepend(el('span', 'note', 'Rewritten after the first draft had unsupported statements.'));
+        }
+        else if (m.type === 'verification') { verification = m; showVerification(text, bot, m); }
+        else if (m.type === 'web_offer') offer = m.query;
         else if (m.type === 'error') { text.className = 'err'; text.textContent = m.text; }
       }
       bot.scrollIntoView({block: 'end'});
     }
   } catch (err) { text.className = 'err'; text.textContent = String(err); }
   addSources(bot, sources, abstain);
+  if (offer) {
+    const btn = el('button', 'webbtn', `Search the web for: "${offer}"`);
+    btn.type = 'button';
+    btn.title = 'Sends this exact text to your SearXNG instance';
+    btn.onclick = () => { btn.disabled = true; ask(question, offer); };
+    bot.append(btn);
+  }
   if (answer) history.push({role:'user', content: question}, {role:'assistant', content: answer});
   loadChats();
   $('send').disabled = false; $('q').focus();
-});
+}
 </script>
 </body>
 </html>

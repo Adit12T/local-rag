@@ -37,6 +37,37 @@ class Config:
     min_dense_score: float = 0.25           # abstain below this when there is no keyword hit (no reranker)
     ocr: str = "auto"                       # auto | on | off (scanned PDF pages)
 
+    # Corrective RAG
+    corrective: bool = True                 # grade retrieval; retry weak (ambiguous) results
+    crag_correct_score: float = 0.5         # reranker score at/above which retrieval counts as correct
+    crag_correct_dense: float = 0.6         # same, by vector similarity, when no reranker is installed
+    max_corrective_retries: int = 1
+    hyde: bool = False                      # also search with a hypothetical answer passage when ambiguous
+    expand_neighbors: int = 1               # add adjacent chunks from the same section
+    context_chars: int = 12000              # budget for all source text sent to the model
+    refine_strips: bool = True              # drop irrelevant sentences inside chunks (needs the reranker)
+    strip_min_score: float = 0.01
+
+    # Agentic RAG
+    router: str = "auto"                    # auto | llm | heuristic | off
+    max_sub_queries: int = 3
+    iterate: str = "auto"                   # auto | on | off: extra retrieval rounds for multi-part questions
+    max_rounds: int = 2
+    max_context_chunks: int = 8
+    agent_mode: bool = False                # experimental: the model drives read-only search tools
+    agent_max_steps: int = 6
+
+    # Answer verification
+    verify: str = "auto"                    # auto | llm | minicheck | off
+    verify_model: str = "bespoke-minicheck"
+    verify_regenerate: bool = True
+    verify_threshold: float = 0.34          # regenerate once if more than this share of sentences is unsupported
+
+    # Web search fallback (off: queries about private files would leave the machine)
+    web_search: bool = False
+    searxng_url: str = ""
+    web_max_results: int = 3
+
     # Chat
     rewrite_queries: bool = True
     history_turns: int = 6
@@ -70,10 +101,24 @@ def load_config(path: str = "config.yaml") -> Config:
     unknown = set(raw) - {f.name for f in fields(Config)}
     if unknown:
         raise SystemExit(f"{path}: unknown setting(s): {', '.join(sorted(unknown))}")
+    # YAML 1.1 reads an unquoted `on`/`off` as a boolean; map it back to the mode string.
+    for name in ("rerank", "ocr", "iterate", "router", "verify"):
+        if isinstance(raw.get(name), bool):
+            raw[name] = "on" if raw[name] else "off"
     cfg = Config(paths=paths, extensions=exts, ignore=ignore, **raw)
     if cfg.retrieval_mode not in ("hybrid", "dense", "keyword"):
         raise SystemExit("retrieval_mode must be hybrid, dense or keyword")
-    for name in ("rerank", "ocr"):
+    for name in ("rerank", "ocr", "iterate"):
         if getattr(cfg, name) not in ("auto", "on", "off"):
             raise SystemExit(f"{name} must be auto, on or off")
+    if cfg.router not in ("auto", "llm", "heuristic", "off"):
+        raise SystemExit("router must be auto, llm, heuristic or off")
+    if cfg.verify not in ("auto", "llm", "minicheck", "off"):
+        raise SystemExit("verify must be auto, llm, minicheck or off")
+    if cfg.web_search and not cfg.searxng_url.startswith(("http://", "https://")):
+        raise SystemExit("web_search needs searxng_url (the address of your SearXNG instance)")
+    cfg.max_sub_queries = max(1, min(cfg.max_sub_queries, 5))
+    cfg.max_rounds = max(1, min(cfg.max_rounds, 3))
+    cfg.max_corrective_retries = max(0, min(cfg.max_corrective_retries, 2))
+    cfg.agent_max_steps = max(1, min(cfg.agent_max_steps, 12))
     return cfg

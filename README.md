@@ -21,6 +21,33 @@ Chat with the files in folders you choose. Everything runs on your machine
 - **Optional OCR** for scanned PDF pages (RapidOCR, fully local; only pages without a text layer are OCR'd).
 - **Correct embedding prefixes** for nomic-embed-text, mxbai-embed-large and qwen3-embedding.
 - **Filters** by folder and file type, and at most `max_per_file` chunks from one file.
+- **Small-to-big context**: a matched chunk pulls in its neighbours from the same section
+  (`expand_neighbors`), and long prose chunks are trimmed to the sentences that match the question
+  when the reranker is installed (`refine_strips`). A character budget (`context_chars`) caps the prompt.
+
+**Corrective and agentic retrieval**
+- **Corrective RAG**: every search is graded `correct`, `ambiguous` or `incorrect` from the reranker
+  score (or vector similarity when no reranker is installed). Ambiguous results trigger one retry with
+  an alternative query (and HyDE if `hyde: true`). Incorrect results are not sent to the model at all:
+  the answer is "not found" and the closest matches are only shown.
+- **Query planning**: simple questions use a heuristic route; comparisons and multi-part questions are
+  split into up to `max_sub_queries` sub-queries (structured output, with a heuristic fallback). Small
+  chat models (3B and below, e.g. `llama3.2`) keep the LLM planner and verifier off under `auto`.
+- **Iterative retrieval**: after retrieval the model judges whether the evidence is sufficient; if not,
+  it searches again for what is missing, up to `max_rounds`, and stops as soon as a round adds nothing.
+- **Optional tool agent** (`agent_mode: true`, experimental): the model may call read-only tools
+  (`search`, `keyword_search`, `read_file`, `list_folder`) for up to `agent_max_steps` steps. Tools are
+  limited to your configured folders, and the agent only collects sources; the answer is still written
+  by the normal grounded prompt.
+
+**Answer verification**
+- Each answer sentence is checked against the sources it cites: unsupported sentences and wrong
+  citation numbers are flagged in the UI. Judged by the chat model (`verify: llm`) or by
+  `bespoke-minicheck` through Ollama (`verify: minicheck`). At most one rewrite is attempted.
+
+**Opt-in web search**
+- Off by default. With `web_search: true` and your own SearXNG instance (`searxng_url`), the UI offers a
+  button that searches the exact query you approve. Web results are untrusted and marked as such.
 
 **Indexing**
 - Reads only the paths you allow; symlinks that lead outside them are not followed.
@@ -70,19 +97,28 @@ Chat with the files in folders you choose. Everything runs on your machine
 ## How a question is answered
 
 ```
-question ──(history?)──> rewrite to standalone query
-                              │
-              ┌───────────────┴───────────────┐
-        vector search (Chroma)        keyword search (FTS5 BM25)
-              └───────────────┬───────────────┘
-                 reciprocal rank fusion (top 30)
-                              │
-                 rerank (if installed) ──> relevant enough? ── no ──> "not found" + closest matches
-                              │ yes
-                 cap per file, keep top 6
-                              │
+question ──(history?)──> rewrite to standalone query ──> plan (simple / multi-part, sub-queries)
+                                                              │
+              ┌───────────────────────────────┴───────────────────────────────┐
+        vector search (Chroma)                                 keyword search (FTS5 BM25)
+              └───────────────────────────────┬───────────────────────────────┘
+                              RRF over all queries (top 30 each)
+                                              │
+                 grade: correct / ambiguous / incorrect (reranker or similarity)
+                    │ incorrect → "not found" + closest matches (model not called)
+                    │ ambiguous → one retry (alternative query, HyDE if on)
+                                              │
+                 sufficient? ── no ──> search for what is missing (max_rounds)
+                                              │ yes
+                 neighbours + refined strips, cap per file, context budget
+                                              │
                  answer with [n] citations (streamed)
+                                              │
+                 verify each sentence against its sources ── problems ──> one rewrite
 ```
+
+Each step is shown in the UI under "Steps", and the verification result under the answer.
+Set `router`, `verify`, `iterate`, `corrective` or `agent_mode` in `config.yaml` to turn stages off.
 
 ## How access works
 
@@ -137,6 +173,12 @@ number to set the "not found" threshold below.
 
 ## Limits
 
+- The corrective, planning, verification and agent features were tested with a deterministic stand-in
+  for Ollama (`tests/fake_ollama.py`). Answer quality with real models, the reranker's score scale and the
+  default thresholds still need checking on your own files and questions (`python -m rag.eval --answers`).
+- `bespoke-minicheck` is licensed CC BY-NC; check that license before commercial use.
+- The agent mode and LLM planner need a capable chat model (qwen3:4b or larger is a reasonable start).
+- Unquoted `on`/`off` in YAML are read as booleans; the loader maps them back to the mode names.
 - Without the OCR packages, scanned PDFs show up in Activity as "no extractable text". OCR covers
   PDFs only (not standalone image files) and is slow on large scans (roughly a second or more per page on CPU).
 - The brace-language splitter is a lightweight scanner, not a parser. If a file's braces do not
@@ -145,8 +187,16 @@ number to set the "not found" threshold below.
 
 ## Test
 
-`pip install httpx && python tests/test_rag.py` runs chunking, indexing, hybrid search, the
-watcher, the API and the security checks end to end with a fake model (no Ollama needed).
+```
+pip install -r requirements.txt pytest httpx
+python -m pytest -q tests
+```
+
+`tests/test_rag.py` covers chunking, indexing, hybrid search, the watcher, the API and the security
+checks. `tests/test_pipeline.py` covers grading, retries, planning, iteration, the agent's path
+limits, verification, web search and the API limits. Both run against fakes (no Ollama needed).
+To exercise the whole app against the stand-in model:
+`python tests/fake_ollama.py 11500` in one terminal, then point `ollama_url` at it and run `python -m rag`.
 
 ## Layout
 
@@ -161,6 +211,10 @@ rag/chats.py           saved conversations
 rag/ollama_client.py   embeddings (with task prefixes), streaming chat, structured output
 rag/watcher.py         file watcher, debounce, periodic rescan
 rag/server.py          FastAPI app: chat, query rewriting, security, query log
-rag/eval.py            golden-set retrieval evaluation
+rag/pipeline.py        traditional, corrective and agentic flow (grading, planning, iteration, context)
+rag/verify.py          sentence-level answer verification and citation checks
+rag/agent.py           experimental read-only tool agent (path-bounded)
+rag/websearch.py       opt-in SearXNG client
+rag/eval.py            golden-set retrieval and answer evaluation
 rag/static/index.html  chat UI
 ```
