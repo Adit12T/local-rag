@@ -1,0 +1,10 @@
+# Use the Ollama already running on this machine instead of the ollama container.
+#   docker compose -f docker-compose.yml -f docker-compose.host-ollama.yml up -d rag
+# Pull the models on the host first: ollama pull nomic-embed-text && ollama pull llama3.2
+services:
+  rag:
+    depends_on: !reset {}
+    environment:
+      RAG_OLLAMA_URL: http://host.docker.internal:11434
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # needed on Linux; Docker Desktop already has it

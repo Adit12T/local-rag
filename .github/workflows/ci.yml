@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -r requirements.txt httpx pytest
+      - run: python -m pytest -q tests
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate compose files
+        run: |
+          docker compose config -q
+          docker compose -f docker-compose.yml -f docker-compose.host-ollama.yml config -q
+          docker compose -f docker-compose.yml -f docker-compose.gpu.yml config -q
+      - name: Build image
+        run: docker build -t local-rag:ci .
+      - name: Start container and check the UI answers
+        run: |
+          docker run -d --name rag -p 127.0.0.1:8000:8000 -e RAG_ALLOW_UNAUTHENTICATED_BIND=true local-rag:ci
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8000/ >/dev/null && break; sleep 2; done
+          curl -fsS http://127.0.0.1:8000/ >/dev/null
+          test "$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: evil.example' http://127.0.0.1:8000/)" = 400
+          docker logs rag

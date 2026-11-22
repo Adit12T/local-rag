@@ -1,0 +1,67 @@
+# Local RAG with Ollama, all in Docker.
+#
+#   RAG_DOCS=~/Documents/notes docker compose up -d     # first start pulls the two models (a few GB)
+#   open http://127.0.0.1:8000
+#
+# Already run Ollama on this machine (faster on a Mac, which Docker cannot give a GPU)?
+#   RAG_DOCS=~/Documents/notes docker compose -f docker-compose.yml -f docker-compose.host-ollama.yml up -d rag
+# NVIDIA GPU on Linux?
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+
+name: local-rag
+
+services:
+  ollama:
+    image: ollama/ollama:${OLLAMA_VERSION:-latest}
+    volumes:
+      - ollama-models:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  # Pulls the models once; later starts are instant because they live in the ollama-models volume.
+  ollama-pull:
+    image: ollama/ollama:${OLLAMA_VERSION:-latest}
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - ollama pull "${RAG_EMBED_MODEL:-nomic-embed-text}" && ollama pull "${RAG_CHAT_MODEL:-llama3.2}"
+    restart: "no"
+
+  rag:
+    build:
+      context: .
+      args:
+        RERANK: ${RAG_RERANK_INSTALL:-true}
+    image: local-rag:latest
+    depends_on:
+      ollama-pull:
+        condition: service_completed_successfully
+    environment:
+      RAG_OLLAMA_URL: ${RAG_OLLAMA_URL:-http://ollama:11434}
+      RAG_EMBED_MODEL: ${RAG_EMBED_MODEL:-nomic-embed-text}
+      RAG_CHAT_MODEL: ${RAG_CHAT_MODEL:-llama3.2}
+      RAG_AUTH_TOKEN: ${RAG_AUTH_TOKEN:-}
+      RAG_ALLOW_UNAUTHENTICATED_BIND: "true"
+      # Docker Desktop on macOS/Windows does not always pass file events through bind mounts.
+      RAG_WATCH_POLLING: ${RAG_WATCH_POLLING:-false}
+    volumes:
+      - ${RAG_DOCS:-./sample-docs}:/docs:ro
+      - rag-data:/data
+      # Optional: tune settings with your own copy of config.yaml
+      # - ./config.yaml:/app/config.yaml:ro
+    ports:
+      # Loopback only: the UI and API are reachable from this machine, not the network.
+      - "127.0.0.1:${RAG_PORT_PUBLISHED:-8000}:8000"
+    restart: unless-stopped
+
+volumes:
+  ollama-models:
+  rag-data:

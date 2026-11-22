@@ -59,6 +59,56 @@ Chat with the files in folders you choose. Everything runs on your machine
    python -m rag
    ```
 
+## Run it with Docker
+
+Needs only Docker (Docker Desktop on macOS/Windows). Ollama runs in its own container and the
+two models are pulled on the first start (a few GB, kept in a volume).
+
+```
+RAG_DOCS=~/Documents/notes docker compose up -d
+```
+
+Open http://127.0.0.1:8000. Follow the first start with `docker compose logs -f ollama-pull rag`.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `RAG_DOCS` | `./sample-docs` | Folder to chat with, mounted read-only at `/docs` |
+| `RAG_CHAT_MODEL` / `RAG_EMBED_MODEL` | `llama3.2` / `nomic-embed-text` | Models to pull and use |
+| `RAG_WATCH_POLLING` | `false` | Set `true` if edits on the host are not picked up (some Docker Desktop setups) |
+| `RAG_AUTH_TOKEN` | empty | Set it before publishing the port beyond 127.0.0.1 |
+| `RAG_PORT_PUBLISHED` | `8000` | Port on this machine |
+
+More than one folder: add more mounts under `/docs` in `docker-compose.yml`
+(for example `- ~/projects:/docs/projects:ro`); everything under `/docs` is indexed.
+
+Variants:
+
+```
+# Use the Ollama already installed on this machine (faster on a Mac: Docker cannot use its GPU)
+docker compose -f docker-compose.yml -f docker-compose.host-ollama.yml up -d rag
+
+# NVIDIA GPU on Linux (NVIDIA Container Toolkit installed)
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+
+# Image without the reranker (smaller)
+RAG_RERANK_INSTALL=false docker compose build rag
+```
+
+How the container stays safe:
+
+- Your folder is mounted read-only; the index lives in the `rag-data` volume.
+- The app runs as a non-root user.
+- Inside the container it listens on 0.0.0.0, but the port is published on `127.0.0.1` only, so
+  nothing on your network can reach it. That is the only case `RAG_ALLOW_UNAUTHENTICATED_BIND` is
+  meant for; without it the app still refuses a non-loopback address unless `auth_token` is set.
+- The Host-header check still blocks DNS-rebinding attacks.
+
+Every `config.yaml` setting can be overridden with an environment variable named `RAG_<SETTING>`
+(for example `RAG_TOP_K=8`). To tune many settings, mount your own copy of `config.yaml` at
+`/app/config.yaml` (commented line in `docker-compose.yml`).
+
+`docker compose down` stops everything; `docker compose down -v` also deletes the index and the models.
+
 ## How a question is answered
 
 ```
@@ -135,8 +185,9 @@ number to set the "not found" threshold below.
 
 ## Test
 
-`pip install httpx && python tests/test_rag.py` runs chunking, indexing, hybrid search, the
-watcher, the API and the security checks end to end with a fake model (no Ollama needed).
+`pip install httpx pytest && python -m pytest tests` runs chunking, indexing, hybrid search, the
+watcher, the API and the security checks end to end with a fake model (no Ollama needed), plus the Docker settings: `RAG_*` overrides
+and the polling watcher.
 
 ## Layout
 
@@ -151,4 +202,7 @@ rag/watcher.py         file watcher, debounce, periodic rescan
 rag/server.py          FastAPI app: chat, query rewriting, security, query log
 rag/eval.py            golden-set retrieval evaluation
 rag/static/index.html  chat UI
+Dockerfile             app image (Python 3.12, non-root, healthcheck)
+docker-compose*.yml    app + Ollama; host-Ollama and GPU variants
+sample-docs/           what the container indexes until you set RAG_DOCS
 ```

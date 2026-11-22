@@ -23,8 +23,12 @@ def main():
 
     cfg = load_config(args.config)
     if cfg.host not in LOOPBACK and not cfg.auth_token:
-        raise SystemExit(f"host is {cfg.host}, which exposes your files to the network. "
-                         "Set auth_token in config.yaml, or use host: 127.0.0.1")
+        if not cfg.allow_unauthenticated_bind:
+            raise SystemExit(f"host is {cfg.host}, which exposes your files to the network. "
+                             "Set auth_token in config.yaml, or use host: 127.0.0.1")
+        logging.getLogger("rag").warning(
+            "Listening on %s without auth_token (allow_unauthenticated_bind). Publish the port "
+            "on 127.0.0.1 only, or set auth_token.", cfg.host)
     print(f"\n  Local RAG -> http://{cfg.host}:{cfg.port}\n")
     uvicorn.run(create_app(cfg, make_llm(cfg)), host=cfg.host, port=cfg.port, log_level="warning")
 
