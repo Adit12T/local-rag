@@ -1,3 +1,5 @@
+import os
+import typing
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 
@@ -44,6 +46,7 @@ class Config:
     # Auto-update
     debounce_seconds: float = 1.5
     rescan_minutes: float = 10
+    watch_polling: bool = False             # poll for changes instead of OS events (network drives, some Docker mounts)
 
     # Server
     data_dir: Path = Path("./rag_data")
@@ -51,10 +54,58 @@ class Config:
     port: int = 8000
     auth_token: str = ""
     allowed_hosts: list[str] = field(default_factory=list)
+    # Allows a non-loopback host without auth_token. Only for a container whose published
+    # port is bound to 127.0.0.1 on the machine running it (see docker-compose.yml).
+    allow_unauthenticated_bind: bool = False
+
+
+ENV_PREFIX = "RAG_"
+_TRUE, _FALSE = {"1", "true", "yes", "on"}, {"0", "false", "no", "off", ""}
+
+
+def _env_value(name: str, raw: str, kind):
+    if kind is bool:
+        if raw.strip().lower() in _TRUE:
+            return True
+        if raw.strip().lower() in _FALSE:
+            return False
+        raise SystemExit(f"{ENV_PREFIX}{name.upper()} must be true or false, not {raw!r}")
+    if kind in (int, float):
+        try:
+            return kind(raw)
+        except ValueError:
+            raise SystemExit(f"{ENV_PREFIX}{name.upper()} must be a number, not {raw!r}") from None
+    return raw
+
+
+def env_overrides(environ=None) -> dict:
+    """Settings from RAG_<SETTING> environment variables, e.g. RAG_OLLAMA_URL or RAG_PORT.
+
+    List settings (RAG_PATHS, RAG_EXTENSIONS, RAG_IGNORE, RAG_ALLOWED_HOSTS) are comma-separated.
+    Used by the Docker image; they win over config.yaml.
+    """
+    environ = os.environ if environ is None else environ
+    hints = typing.get_type_hints(Config)
+    out = {}
+    for name in [f.name for f in fields(Config)]:
+        raw = environ.get(ENV_PREFIX + name.upper())
+        if raw is None:
+            continue
+        kind = hints[name]
+        if name in ("paths", "extensions", "ignore", "allowed_hosts"):
+            out[name] = [v.strip() for v in raw.split(",") if v.strip()]
+        elif name == "data_dir":
+            out[name] = raw
+        elif kind in (bool, int, float, str):
+            out[name] = _env_value(name, raw, kind)
+        else:  # str | None
+            out[name] = raw or None
+    return out
 
 
 def load_config(path: str = "config.yaml") -> Config:
     raw = yaml.safe_load(Path(path).read_text()) or {}
+    raw.update(env_overrides())
     paths = [Path(p).expanduser().resolve() for p in raw.pop("paths", None) or []]
     if not paths:
         raise SystemExit(f"{path}: add at least one entry under 'paths:'")

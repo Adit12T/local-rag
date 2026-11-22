@@ -10,6 +10,7 @@ from pathlib import Path
 
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
+from watchdog.observers.polling import PollingObserver
 
 from .index import Indexer
 
@@ -38,7 +39,7 @@ class Watcher:
         self.pending: dict[str, float] = {}
         self.lock = threading.Lock()
         self.stop_event = threading.Event()
-        self.observer = Observer()
+        self.observer = PollingObserver(timeout=2) if self.cfg.watch_polling else Observer()
 
     def touch(self, path):
         if isinstance(path, bytes):

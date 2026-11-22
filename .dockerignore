@@ -1,0 +1,13 @@
+.git
+.github
+.venv
+venv
+rag_data
+**/__pycache__
+**/*.pyc
+.idea
+.vscode
+.DS_Store
+tests
+eval
+docker-compose*.yml

@@ -47,6 +47,8 @@ log_queries: true        # writes rag_data/queries.jsonl (question, retrieved ch
 # ---- Auto-update ----
 debounce_seconds: 1.5    # wait for a file to stop changing before re-indexing
 rescan_minutes: 10       # safety-net full rescan (catches missed events, e.g. network drives)
+watch_polling: false     # true = poll every 2 s instead of OS file events (use if edits are not picked up,
+                         # e.g. some network drives or Docker bind mounts)
 
 # ---- Server ----
 data_dir: ./rag_data
@@ -54,3 +56,8 @@ host: 127.0.0.1          # keep on loopback unless you set auth_token
 port: 8000
 auth_token: ""           # if set, the UI asks for it and every API call must send it
 # allowed_hosts: [my-laptop.local]   # extra Host names to accept
+# allow_unauthenticated_bind: false  # only for Docker: lets the container listen on 0.0.0.0 without
+#                                    # auth_token because docker-compose.yml publishes the port on 127.0.0.1 only
+
+# Any setting can also come from an environment variable named RAG_<SETTING>, for example
+# RAG_OLLAMA_URL or RAG_CHAT_MODEL (lists comma-separated: RAG_PATHS=/docs,/more). They win over this file.
