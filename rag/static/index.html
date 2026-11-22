@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Local RAG</title>
+<link rel="icon" href="data:,">
 <style>
   :root { --bg:#f6f5f1; --panel:#fff; --ink:#1d1d1b; --muted:#6d6b65; --line:#e2dfd6; --accent:#1f5f4a; --user:#e7efe9; }
   @media (prefers-color-scheme: dark) {
@@ -104,6 +105,8 @@ async function refresh() {
     const stat = $('stat'); stat.textContent = '';
     stat.append(el('span', 'dot' + (s.busy ? ' busy' : '')),
       `${s.files} files · ${s.chunks} chunks · ${s.mode}${s.reranker ? ' + rerank' : ''}` + (s.busy ? ' · indexing…' : ''));
+    const failed = s.events.filter(e => e.action === 'error').length;
+    if (failed) stat.append(el('span', 'err', ` · ${failed} file${failed > 1 ? 's' : ''} failed to index, see Activity`));
     fill($('fRoot'), s.paths, 'All folders', p => p.split(/[\\/]/).filter(Boolean).pop());
     fill($('fExt'), s.extensions, 'All types', e => e);
     const act = $('activity'); act.textContent = '';

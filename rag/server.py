@@ -177,7 +177,14 @@ def create_app(cfg: Config, llm, watch: bool = True) -> FastAPI:
                 yield json.dumps({"type": "sources", "query": query, "abstain": result["abstain"],
                                   "trace": result["trace"], "sources": sources}) + "\n"
                 if result["abstain"]:
-                    answer = NOT_FOUND if indexer.status()["files"] else "Nothing is indexed yet, so I have no files to answer from."
+                    status = indexer.status()
+                    failure = next((e["detail"] for e in status["events"] if e["action"] == "error"), "")
+                    if status["files"]:
+                        answer = NOT_FOUND
+                    elif failure:  # e.g. Ollama is not running, so nothing could be embedded
+                        answer = f"Nothing is indexed yet because indexing failed: {failure}"
+                    else:
+                        answer = "Nothing is indexed yet, so I have no files to answer from."
                     yield json.dumps({"type": "token", "text": answer}) + "\n"
                 else:
                     context = "\n\n".join(source_block(i, h) for i, h in enumerate(hits, 1))
