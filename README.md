@@ -42,8 +42,9 @@ Chat with the files in folders you choose. Everything runs on your machine
 
 **Answer verification**
 - Each answer sentence is checked against the sources it cites: unsupported sentences and wrong
-  citation numbers are flagged in the UI. Judged by the chat model (`verify: llm`) or by
-  `bespoke-minicheck` through Ollama (`verify: minicheck`). At most one rewrite is attempted.
+  citation numbers are flagged in the UI. Judged by the chat model (`verify: llm`), by IBM Granite
+  Guardian through Ollama (`verify: guardian`, Apache 2.0, `ollama pull granite4.1-guardian:8b`), or by
+  `bespoke-minicheck` (`verify: minicheck`, non-commercial licence). At most one rewrite is attempted.
 
 **Opt-in web search**
 - Off by default. With `web_search: true` and your own SearXNG instance (`searxng_url`), the UI offers a
@@ -226,7 +227,8 @@ number to set the "not found" threshold below.
 - The corrective, planning, verification and agent features were tested with a deterministic stand-in
   for Ollama (`tests/fake_ollama.py`). Answer quality with real models, the reranker's score scale and the
   default thresholds still need checking on your own files and questions (`python -m rag.eval --answers`).
-- `bespoke-minicheck` is licensed CC BY-NC; check that license before commercial use.
+- `bespoke-minicheck` is licensed CC BY-NC (non-commercial only), so it is never chosen automatically.
+  For a dedicated checker you can use commercially, choose `verify: guardian` (Granite Guardian, Apache 2.0).
 - The agent mode and LLM planner need a capable chat model (qwen3:4b or larger is a reasonable start).
 - Unquoted `on`/`off` in YAML are read as booleans; the loader maps them back to the mode names.
 - Without the OCR packages, scanned PDFs show up in Activity as "no extractable text". OCR covers
@@ -248,6 +250,16 @@ limits, verification, web search and the API limits. `tests/test_docker_config.p
 settings: `RAG_*` overrides and the polling watcher. All of them run against fakes (no Ollama needed).
 To exercise the whole app against the stand-in model:
 `python tests/fake_ollama.py 11500` in one terminal, then point `ollama_url` at it and run `python -m rag`.
+
+Two more checks run in CI:
+
+- **Browser test** of saved chats (create, follow up, new chat, reload, reopen, continue, delete) in
+  headless Chrome against the stand-in model: start `python tests/fake_ollama.py 11500` and
+  `python -m rag -c tests/ui/config.yaml`, then `cd tests/ui && npm install && npm test`.
+- **Real Ollama smoke test** (`.github/workflows/real-ollama.yml`): installs Ollama, pulls
+  `nomic-embed-text`, `qwen2.5:1.5b` and `granite4.1-guardian:8b`, and checks Granite Guardian's
+  verdicts, indexing with real embeddings, retrieval, a streamed answer, verification and saved chats.
+  Run it on your own machine with `python tests/real_ollama_smoke.py` once those models are pulled.
 
 ## Layout
 

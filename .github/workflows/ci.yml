@@ -39,3 +39,35 @@ jobs:
           curl -fsS http://127.0.0.1:8000/ >/dev/null
           test "$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: evil.example' http://127.0.0.1:8000/)" = 400
           docker logs rag
+
+  ui:
+    # Saved chats in a real browser (headless Chrome) against the stand-in model.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: pip install -r requirements.txt
+      - name: Start the stand-in model and the app
+        run: |
+          python tests/fake_ollama.py 11500 > fake_ollama.log 2>&1 &
+          python -m rag -c tests/ui/config.yaml > rag.log 2>&1 &
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8770/api/status >/dev/null && break; sleep 1; done
+      - name: Browser test
+        working-directory: tests/ui
+        env:
+          SHOT_DIR: ${{ runner.temp }}
+          CHROME_PATH: /usr/bin/google-chrome
+        run: npm install --no-audit --no-fund && npm test
+      - if: always()
+        run: cat rag.log
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-screenshots
+          path: ${{ runner.temp }}/*.png

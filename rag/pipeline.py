@@ -137,6 +137,10 @@ class Counted:
         self.calls += 1
         return self.llm.check(*a, **k)
 
+    def guardian_check(self, *a, **k):
+        self.calls += 1
+        return self.llm.guardian_check(*a, **k)
+
 
 def _join(a: str, b: str) -> str:
     """Concatenate neighbouring chunks, removing the overlap they share."""

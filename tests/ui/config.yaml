@@ -1,0 +1,13 @@
+# Used by the browser test (tests/ui/saved_chats.mjs) with the stand-in model (tests/fake_ollama.py).
+# Run from the repository root:  python -m rag -c tests/ui/config.yaml
+paths:
+  - tests/ui/docs
+extensions: [.md]
+ignore: []
+ollama_url: http://127.0.0.1:11500
+chat_model: qwen3:8b
+rerank: "off"
+ocr: "off"
+data_dir: /tmp/local-rag-ui-test
+port: 8770
+rescan_minutes: 0

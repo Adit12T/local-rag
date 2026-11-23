@@ -107,6 +107,10 @@ class ScriptLLM:
         ws = set(words(claim))
         return bool(ws) and len(ws & set(words(document))) / len(ws) >= 0.7
 
+    def guardian_check(self, model, document, claim):
+        self.guardian_models = getattr(self, "guardian_models", []) + [model]
+        return self.check(model, document, claim)
+
     def chat_stream(self, messages):
         self.prompts.append(messages)
         text = self.answer(messages) if callable(self.answer) else (self.answer or "Stub answer [1].")
@@ -372,10 +376,62 @@ def test_verification_flags_and_rewrites_unsupported_answers(env):
 def test_verification_detects_wrong_citations_and_minicheck_backend(env):
     hits = [{"text": "Production deploys happen every Thursday."}, {"text": "Invoices are stored in Postgres 15."}]
     answer = "Production deploys happen every Thursday [2]. Invoices are stored in Postgres 15 [2]."
-    for backend in ("llm", "minicheck"):
-        v = Verifier(backend, env["llm"], "bespoke-minicheck").verify(answer, hits)
+    for backend in ("llm", "minicheck", "guardian"):
+        v = Verifier(backend, env["llm"]).verify(answer, hits)
         assert v["unsupported"] == 0 and v["citation_errors"] == 1, (backend, v)
         assert "fix" in v["segments"][0]
+    unsupported = Verifier("guardian", env["llm"]).verify("Invoices are archived to tape every night [2].", hits)
+    assert unsupported["unsupported"] == 1
+
+
+def test_guardian_backend_through_the_pipeline(env):
+    """The pipeline wraps the model client; the guardian call must get through that wrapper."""
+    env["cfg"].verify = "guardian"
+    llm = env["llm"]
+    llm.answer = ("The orders topic keeps messages for seven days [1]. "
+                  "Messages are also mirrored to a backup datacenter in Ohio every hour [1].")
+    events, _ = run(Pipeline(env["cfg"], llm, env["ix"]), "how long does the orders topic keep messages")
+    v = [e for e in events if e["type"] == "verification"][0]
+    assert v["checked"] == 2 and v["unsupported"] == 1
+    assert set(llm.guardian_models) == {"granite4.1-guardian:8b"}
+
+
+def test_verifier_default_models_per_backend(env):
+    assert Verifier("guardian", env["llm"]).model == "granite4.1-guardian:8b"
+    assert Verifier("minicheck", env["llm"]).model == "bespoke-minicheck"
+    assert Verifier("guardian", env["llm"], "granite4.1-guardian:8b-q4_K_M").model == "granite4.1-guardian:8b-q4_K_M"
+
+
+def test_guardian_verdict_parsing():
+    from rag.ollama_client import OllamaError, guardian_risk
+    assert guardian_risk("<score> yes </score>") is True
+    assert guardian_risk("<think>reasoning mentions no</think>\n<score>No</score>") is False
+    assert guardian_risk("Yes") is True and guardian_risk("no") is False      # older guardian models
+    with pytest.raises(OllamaError):
+        guardian_risk("I cannot decide")
+
+
+def test_guardian_request_over_http():
+    """The real client against the stand-in server: roles, criterion and verdict mapping."""
+    from http.server import ThreadingHTTPServer
+    from rag.ollama_client import Ollama
+    from tests.fake_ollama import Handler
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        client = Ollama(f"http://127.0.0.1:{srv.server_address[1]}", "embed", "chat")
+        sent, post = [], client._post
+        client._post = lambda path, payload, **kw: (sent.append(payload), post(path, payload, **kw))[1]
+        doc = 'The "orders" topic keeps messages for seven days.'
+        assert client.guardian_check("granite4.1-guardian:8b", doc, "The orders topic keeps messages for seven days.")
+        assert not client.guardian_check("granite4.1-guardian:8b", doc, "Messages are mirrored to Ohio hourly.")
+    finally:
+        srv.shutdown()
+    req = sent[0]
+    assert [m["role"] for m in req["messages"]] == ["system", "document", "assistant"]
+    assert req["messages"][0]["content"] == "groundedness" and '"' not in req["messages"][1]["content"]
+    assert req["options"]["temperature"] == 0 and req["think"] is False
 
 
 def test_no_regeneration_loop(env):

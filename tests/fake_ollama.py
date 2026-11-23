@@ -3,7 +3,7 @@
     python tests/fake_ollama.py 11500
 
 Implements /api/embed, /api/chat (streaming, `format` structured output, `tools`) and
-/api/generate (Yes/No grounding checks), with deterministic word-overlap behaviour.
+/api/generate (Yes/No grounding checks), Granite Guardian groundedness checks on /api/chat, with deterministic word-overlap behaviour.
 """
 import hashlib
 import json
@@ -93,6 +93,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"response": "Yes" if ok else "No"})
         if self.path == "/api/chat":
             msgs = body["messages"]
+            if msgs and msgs[0].get("role") == "system" and msgs[0].get("content") == "groundedness":
+                doc = " ".join(m["content"] for m in msgs if m["role"].startswith("document"))
+                ws = set(words(msgs[-1]["content"]))
+                ok = bool(ws) and len(ws & set(words(doc))) / len(ws) >= 0.7
+                return self._json({"message": {"role": "assistant",
+                                               "content": f"<score> {'no' if ok else 'yes'} </score>"}})
             if body.get("format"):
                 props = set(body["format"].get("properties", {}))
                 return self._json({"message": {"role": "assistant",
