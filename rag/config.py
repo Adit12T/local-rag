@@ -60,8 +60,8 @@ class Config:
     agent_max_steps: int = 6
 
     # Answer verification
-    verify: str = "auto"                    # auto | llm | minicheck | off
-    verify_model: str = "bespoke-minicheck"
+    verify: str = "auto"                    # auto | llm | guardian | minicheck | off
+    verify_model: str = ""                  # empty: granite4.1-guardian:8b for guardian, bespoke-minicheck for minicheck
     verify_regenerate: bool = True
     verify_threshold: float = 0.34          # regenerate once if more than this share of sentences is unsupported
 
@@ -164,8 +164,8 @@ def load_config(path: str = "config.yaml") -> Config:
             raise SystemExit(f"{name} must be auto, on or off")
     if cfg.router not in ("auto", "llm", "heuristic", "off"):
         raise SystemExit("router must be auto, llm, heuristic or off")
-    if cfg.verify not in ("auto", "llm", "minicheck", "off"):
-        raise SystemExit("verify must be auto, llm, minicheck or off")
+    if cfg.verify not in ("auto", "llm", "guardian", "minicheck", "off"):
+        raise SystemExit("verify must be auto, llm, guardian, minicheck or off")
     if cfg.web_search and not cfg.searxng_url.startswith(("http://", "https://")):
         raise SystemExit("web_search needs searxng_url (the address of your SearXNG instance)")
     cfg.max_sub_queries = max(1, min(cfg.max_sub_queries, 5))

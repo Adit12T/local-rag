@@ -1,16 +1,19 @@
 """Answer verification: is each sentence of the answer supported by the sources it was given?
 
-Two backends:
+Three backends:
 - llm: the chat model judges all sentences in one structured-output call. Reasonable with
   4B+ models (e.g. qwen3:4b); unreliable with very small models.
-- minicheck: a dedicated grounding checker served by Ollama (bespoke-minicheck, Yes/No per claim).
-  Check its licence (CC BY-NC 4.0) before using it commercially.
+- guardian: IBM Granite Guardian (granite4.1-guardian, Apache 2.0) checks each claim's groundedness.
+  A dedicated checker that is free for commercial use.
+- minicheck: bespoke-minicheck, a dedicated Yes/No grounding checker. Licensed CC BY-NC 4.0
+  (non-commercial only), so it is opt-in and never chosen automatically.
 """
 import logging
 import re
 
 log = logging.getLogger("rag.verify")
 
+DEFAULT_MODELS = {"guardian": "granite4.1-guardian:8b", "minicheck": "bespoke-minicheck"}
 MAX_SENTENCES = 25
 SOURCE_CHARS = 1500
 _CITE = re.compile(r"\[(\d{1,2})\]")
@@ -70,7 +73,8 @@ def cited(sentence: str, n_sources: int) -> list[int]:
 
 class Verifier:
     def __init__(self, backend: str, llm, model: str = ""):
-        self.backend, self.llm, self.model = backend, llm, model
+        self.backend, self.llm = backend, llm
+        self.model = model or DEFAULT_MODELS.get(backend, "")
 
     def verify(self, answer: str, hits: list[dict], llm=None) -> dict | None:
         """Returns {"segments": [{"t", "s"}], "checked", "unsupported", "citation_errors", "problems"}.
@@ -82,8 +86,8 @@ class Verifier:
         targets = [i for i, s in enumerate(segs) if s["check"]][:MAX_SENTENCES]
         if not targets or not hits:
             return None
-        if self.backend == "minicheck":
-            verdicts = self._minicheck(segs, targets, hits, llm)
+        if self.backend in ("minicheck", "guardian"):
+            verdicts = self._claims(segs, targets, hits, llm)
         else:
             verdicts = self._judge(segs, targets, hits, llm)
         if verdicts is None:
@@ -129,16 +133,18 @@ class Verifier:
                 verdicts[targets[k - 1]] = (bool(r.get("supported")), support)
         return verdicts
 
-    def _minicheck(self, segs, targets, hits, llm):
+    def _claims(self, segs, targets, hits, llm):
+        """Check claim by claim with a dedicated grounding model (guardian or minicheck)."""
+        check = llm.guardian_check if self.backend == "guardian" else llm.check
         verdicts = {}
         everything = "\n\n".join(h["text"][:SOURCE_CHARS] for h in hits)
         try:
             for i in targets:
                 claim = _CITE.sub("", segs[i]["t"]).strip()
                 refs = cited(segs[i]["t"], len(hits))
-                if refs and llm.check(self.model, "\n\n".join(hits[r - 1]["text"][:SOURCE_CHARS] for r in refs), claim):
+                if refs and check(self.model, "\n\n".join(hits[r - 1]["text"][:SOURCE_CHARS] for r in refs), claim):
                     verdicts[i] = (True, refs)
-                elif llm.check(self.model, everything, claim):
+                elif check(self.model, everything, claim):
                     verdicts[i] = (True, None if refs else [])  # supported, but not by the cited source(s)
                 else:
                     verdicts[i] = (False, [])

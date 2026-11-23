@@ -1,0 +1,46 @@
+name: Real Ollama
+
+# End-to-end check with real models (the other tests use a stand-in). Downloads about 7 GB of models
+# and runs on CPU, so it runs when the RAG code changes, weekly, and on demand.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 10 * * 1"
+  push:
+    branches: [ "main" ]
+    paths: [ "rag/**", "tests/real_ollama_smoke.py", ".github/workflows/real-ollama.yml" ]
+  pull_request:
+    paths: [ "rag/**", "tests/real_ollama_smoke.py", ".github/workflows/real-ollama.yml" ]
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CHAT_MODEL: qwen2.5:1.5b
+      EMBED_MODEL: nomic-embed-text
+      GUARDIAN_MODEL: granite4.1-guardian:8b
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -r requirements.txt httpx
+      - name: Install Ollama
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+          (ollama serve > ollama.log 2>&1 &) || true
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:11434/api/version && break; sleep 1; done
+      - name: Pull models
+        run: |
+          ollama pull "$EMBED_MODEL"
+          ollama pull "$CHAT_MODEL"
+          ollama pull "$GUARDIAN_MODEL"
+      - name: Smoke test with real models
+        run: python tests/real_ollama_smoke.py
+      - if: always()
+        run: tail -50 ollama.log || journalctl -u ollama --no-pager | tail -50 || true

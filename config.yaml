@@ -67,8 +67,10 @@ agent_mode: false            # experimental: the model drives read-only search/r
 agent_max_steps: 6
 
 # ---- Answer verification ----
-verify: auto                 # auto | llm | minicheck | off: check each sentence against the sources
-verify_model: bespoke-minicheck   # for verify: minicheck (ollama pull bespoke-minicheck; CC BY-NC licence)
+verify: auto                 # auto | llm | guardian | minicheck | off: check each sentence against the sources
+                             #   guardian: IBM Granite Guardian, Apache 2.0 (ollama pull granite4.1-guardian:8b)
+                             #   minicheck: bespoke-minicheck, CC BY-NC = non-commercial use only
+verify_model: ""             # empty = the default model for the chosen backend
 verify_regenerate: true      # rewrite once if too many sentences are unsupported
 verify_threshold: 0.34
 

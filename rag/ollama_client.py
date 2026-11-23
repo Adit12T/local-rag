@@ -1,6 +1,7 @@
 """Thin client for a local Ollama server (embeddings + chat)."""
 import json
 import logging
+import re
 from typing import Iterator
 
 import requests
@@ -15,6 +16,18 @@ KNOWN_PREFIXES = {
     "qwen3-embedding": (
         "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery: ", ""),
 }
+
+
+_SCORE = re.compile(r"<score>\s*(yes|no)\s*</score>", re.I)
+_BARE = re.compile(r"^\s*(yes|no)\b", re.I)
+
+
+def guardian_risk(text: str) -> bool:
+    """Parse a Granite Guardian verdict. True when the risk is present (for groundedness: unsupported)."""
+    m = _SCORE.search(text) or _BARE.search(text)
+    if not m:
+        raise OllamaError(f"unexpected Granite Guardian output: {text[:80]!r}")
+    return m.group(1).lower() == "yes"
 
 
 class OllamaError(RuntimeError):
@@ -98,6 +111,22 @@ class Ollama:
         payload = {"model": self.chat_model, "messages": messages, "stream": False, "tools": tools,
                    "options": {**self.options, "temperature": 0}}
         return self._post("/api/chat", payload).json().get("message", {})
+
+    def guardian_check(self, model: str, document: str, claim: str) -> bool:
+        """Grounding check with IBM Granite Guardian (granite4.1-guardian, Apache 2.0). True = supported.
+
+        The criterion id goes in the system message, the source in a `document` message and the claim
+        in the assistant message being judged. The model answers `<score> yes </score>` when the risk
+        is present, i.e. when the claim is NOT supported by the document.
+        """
+        payload = {"model": model, "stream": False, "think": False,
+                   "messages": [{"role": "system", "content": "groundedness"},
+                                # the model's template does not escape documents; double quotes can break it
+                                {"role": "document", "content": document.replace('"', "'")},
+                                {"role": "assistant", "content": claim}],
+                   "options": {"temperature": 0, "num_ctx": self.options["num_ctx"]}}
+        text = self._post("/api/chat", payload).json().get("message", {}).get("content", "")
+        return not guardian_risk(text)
 
     def check(self, model: str, document: str, claim: str) -> bool:
         """Grounding check with a fact-checking model such as bespoke-minicheck (answers Yes/No)."""
