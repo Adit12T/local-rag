@@ -23,7 +23,7 @@ from .store import Store
 
 log = logging.getLogger("rag.index")
 
-INDEX_VERSION = "2"  # bump when chunking or stored fields change, to force a rebuild
+INDEX_VERSION = "3"  # bump when chunking or stored fields change, to force a rebuild
 COLLECTION = "documents_v2"
 
 
@@ -32,8 +32,9 @@ def _is_under(path: str, parent: str) -> bool:
 
 
 class Indexer:
-    def __init__(self, cfg: Config, embedder, reranker=None):
+    def __init__(self, cfg: Config, embedder, reranker=None, ocr=None):
         self.cfg = cfg
+        self.ocr = ocr
         self.embedder = embedder  # .embed_documents(list[str]), .embed_query(str), .signature
         self.reranker = reranker
         cfg.data_dir.mkdir(parents=True, exist_ok=True)
@@ -48,7 +49,7 @@ class Indexer:
 
         # Vectors and chunks from a different model / prefix / chunker are not comparable: rebuild.
         signature = "|".join([INDEX_VERSION, embedder.signature, str(cfg.chunk_chars), str(cfg.chunk_overlap),
-                              str(cfg.code_chunk_chars)])
+                              str(cfg.code_chunk_chars), f"ocr={bool(ocr and ocr.enabled)}"])
         previous = self.store.meta("signature")
         if previous != signature:
             if previous:
@@ -121,7 +122,8 @@ class Indexer:
                     return "unchanged"
                 root = self._root_of(key)
                 label = root.name if root.is_file() else f"{root.name}/{real.relative_to(root).as_posix()}"
-                chunks = build_chunks(real, self.cfg.chunk_chars, self.cfg.chunk_overlap, self.cfg.code_chunk_chars)
+                chunks = build_chunks(real, self.cfg.chunk_chars, self.cfg.chunk_overlap, self.cfg.code_chunk_chars,
+                                      self.ocr)
                 # A one-line "where am I" header is embedded with each chunk so it keeps its context.
                 vectors = self._embed_documents(
                     [f"File: {label}{SEP + h if h else ''}\n\n{t}" for h, t in chunks]) if chunks else []
@@ -211,22 +213,42 @@ class Indexer:
         ]
 
     def search(self, query: str, k: int | None = None, roots: list[str] | None = None,
-               exts: list[str] | None = None, mode: str | None = None, rerank: bool = True) -> dict:
-        """Returns {"hits": [...], "abstain": bool, "trace": {...}}."""
+               exts: list[str] | None = None, mode: str | None = None, rerank: bool = True,
+               extra_queries: list[str] | None = None, dense_texts: list[str] | None = None) -> dict:
+        """Hybrid search for `query` (plus any alternative phrasings), graded CRAG-style.
+
+        Every query contributes a dense and a keyword ranking; `dense_texts` (e.g. a HyDE passage)
+        contribute dense rankings only. All rankings are fused with RRF, then reranked against
+        `query`. Returns {"hits", "grade", "best", "abstain", "trace"}, where grade is
+        correct | ambiguous | incorrect.
+        """
         cfg, t0 = self.cfg, time.time()
         k = k or cfg.top_k
         mode = mode or cfg.retrieval_mode
         if not self.store.fts:
             mode = "dense"
-        dense = self._dense(query, cfg.candidates, roots, exts) if mode != "keyword" else []
-        keyword = self.store.keyword_search(query, cfg.candidates, roots, exts) if mode != "dense" else []
+        queries = list(dict.fromkeys([query, *(q for q in extra_queries or [] if q and q.strip())]))
+        rankings, dense_n, keyword_n, keyword_hit = [], 0, 0, False
+        for q in queries:
+            if mode != "keyword":
+                rankings.append(self._dense(q, cfg.candidates, roots, exts))
+                dense_n += len(rankings[-1])
+            if mode != "dense":
+                rankings.append(self.store.keyword_search(q, cfg.candidates, roots, exts))
+                keyword_n += len(rankings[-1])
+                keyword_hit = keyword_hit or bool(rankings[-1])
+        if mode != "keyword":
+            for text in dense_texts or []:
+                rankings.append(self._dense(text, cfg.candidates, roots, exts))
 
-        # Reciprocal rank fusion: score = sum over retrievers of 1 / (rrf_k + rank)
+        # Reciprocal rank fusion: score = sum over rankings of 1 / (rrf_k + rank)
         pool: dict[str, dict] = {}
-        for results in (dense, keyword):
+        for results in rankings:
             for rank, hit in enumerate(results, 1):
                 entry = pool.setdefault(hit["id"], {**hit, "rrf": 0.0})
-                entry.update({f: hit[f] for f in ("dense", "bm25") if f in hit})
+                for f in ("dense", "bm25"):
+                    if f in hit:
+                        entry[f] = max(entry.get(f, hit[f]), hit[f])
                 entry["rrf"] += 1 / (cfg.rrf_k + rank)
         ranked = sorted(pool.values(), key=lambda h: h["rrf"], reverse=True)[: cfg.candidates]
         t_retrieve = time.time()
@@ -236,10 +258,19 @@ class Indexer:
             for hit, s in zip(ranked, scores):
                 hit["rerank"] = round(s, 4)
             ranked.sort(key=lambda h: h["rerank"], reverse=True)
-            abstain = not ranked or ranked[0]["rerank"] < cfg.rerank_min_score
+            best = ranked[0]["rerank"] if ranked else 0.0
+            if not ranked or best < cfg.rerank_min_score:
+                grade = "incorrect"
+            else:
+                grade = "correct" if best >= cfg.crag_correct_score else "ambiguous"
+                # per-chunk evaluation: chunks the reranker scores as irrelevant are not passed on
+                ranked = [h for h in ranked if h["rerank"] >= cfg.rerank_min_score]
         else:
-            best_dense = max((h.get("dense", 0) for h in ranked), default=0)
-            abstain = not ranked or (not keyword and best_dense < cfg.min_dense_score)
+            best = max((h.get("dense", 0) for h in ranked), default=0.0)
+            if not ranked or (not keyword_hit and best < cfg.min_dense_score):
+                grade = "incorrect"
+            else:
+                grade = "correct" if best >= cfg.crag_correct_dense else "ambiguous"
 
         hits, per_file = [], {}
         for hit in ranked:  # diversity: at most max_per_file chunks from one file
@@ -247,15 +278,38 @@ class Indexer:
                 per_file[hit["source"]] = per_file.get(hit["source"], 0) + 1
                 hit["rrf"] = round(hit["rrf"], 4)
                 hit["score"] = hit.get("rerank", hit["rrf"])
+                hit["query"] = query
                 hits.append(hit)
             if len(hits) == k:
                 break
         return {
             "hits": hits,
-            "abstain": abstain,
-            "trace": {"mode": mode, "reranked": scores is not None, "dense_n": len(dense), "keyword_n": len(keyword),
+            "grade": grade,
+            "best": round(float(best), 4),
+            "abstain": grade == "incorrect",
+            "trace": {"mode": mode, "reranked": scores is not None, "queries": len(queries),
+                      "dense_n": dense_n, "keyword_n": keyword_n,
                       "retrieve_ms": round((t_retrieve - t0) * 1000), "rerank_ms": round((time.time() - t_retrieve) * 1000)},
         }
+
+    def neighbors(self, hit: dict, span: int = 1) -> tuple[list[dict], list[dict]]:
+        """Adjacent chunks (before, after) from the same file and section, nearest first."""
+        prefix, _, ordinal = hit["id"].rpartition(":")
+        try:
+            ordinal = int(ordinal)
+        except ValueError:
+            return [], []
+        wanted = [o for d in range(1, span + 1) for o in (ordinal - d, ordinal + d) if o >= 0]
+        if not wanted:
+            return [], []
+        got = self.col.get(ids=[f"{prefix}:{o}" for o in wanted], include=["documents", "metadatas"])
+        found = {}
+        for cid, doc, meta in zip(got["ids"], got["documents"], got["metadatas"]):
+            if meta.get("source") == hit["source"] and meta.get("heading", "") == hit.get("heading", ""):
+                found[int(cid.rpartition(":")[2])] = {"id": cid, "text": doc}
+        before = [found[o] for o in range(ordinal - 1, ordinal - span - 1, -1) if o in found]
+        after = [found[o] for o in range(ordinal + 1, ordinal + span + 1) if o in found]
+        return before, after
 
     # ---------- status ----------
 
@@ -274,5 +328,6 @@ class Indexer:
             "extensions": exts,
             "mode": self.cfg.retrieval_mode if self.store.fts else "dense",
             "reranker": bool(self.reranker and self.reranker.enabled),
+            "ocr": bool(self.ocr and self.ocr.enabled),
             "events": list(self.events)[:15],
         }

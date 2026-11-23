@@ -88,4 +88,19 @@ class Ollama:
         """One non-streaming call constrained to a JSON schema (structured output)."""
         payload = {"model": self.chat_model, "messages": messages, "stream": False, "format": schema,
                    "options": {**self.options, "temperature": 0}}
-        return json.loads(self._post("/api/chat", payload).json()["message"]["content"])
+        out = json.loads(self._post("/api/chat", payload).json()["message"]["content"])
+        if not isinstance(out, dict):
+            raise OllamaError("structured output was not a JSON object")
+        return out
+
+    def chat_tools(self, messages: list[dict], tools: list[dict]) -> dict:
+        """One non-streaming call that may return tool calls (Ollama `tools`)."""
+        payload = {"model": self.chat_model, "messages": messages, "stream": False, "tools": tools,
+                   "options": {**self.options, "temperature": 0}}
+        return self._post("/api/chat", payload).json().get("message", {})
+
+    def check(self, model: str, document: str, claim: str) -> bool:
+        """Grounding check with a fact-checking model such as bespoke-minicheck (answers Yes/No)."""
+        payload = {"model": model, "prompt": f"Document: {document}\nClaim: {claim}", "stream": False,
+                   "options": {"temperature": 0, "num_ctx": self.options["num_ctx"]}}
+        return self._post("/api/generate", payload).json().get("response", "").strip().lower().startswith("yes")
