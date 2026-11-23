@@ -19,7 +19,7 @@ max_file_mb: 20          # bigger files are skipped
 # ---- Ollama (everything runs on your machine) ----
 ollama_url: http://localhost:11434
 embed_model: nomic-embed-text   # task prefixes for nomic / mxbai / qwen3-embedding are applied automatically
-chat_model: llama3.2            # any chat model you have pulled
+chat_model: llama3.2            # any chat model you have pulled; qwen3:4b or qwen3:8b unlock the agentic features
 num_ctx: 8192                   # context window sent to Ollama, so sources + history are not cut off
 temperature: 0.1
 
@@ -39,9 +39,50 @@ rerank_model: ms-marco-MiniLM-L-12-v2
 rerank_min_score: 0.01   # with reranker: answer "not found" if the best score is below this
 min_dense_score: 0.25    # without reranker: "not found" if no keyword hit and similarity below this
 
+# ---- Scanned PDFs ----
+ocr: auto                # auto = OCR pages without a text layer if the OCR packages are installed | on | off
+
+# ---- Corrective RAG ----
+# Every search is graded: correct (answer), ambiguous (retry with other wordings, then answer),
+# or incorrect (say "not found"; the model is not called).
+corrective: true
+crag_correct_score: 0.5      # reranker score at/above which a search counts as correct
+crag_correct_dense: 0.6      # same, by vector similarity, when no reranker is installed
+max_corrective_retries: 1    # extra searches for an ambiguous result (0-2)
+hyde: false                  # also search with a model-written hypothetical answer when ambiguous
+expand_neighbors: 1          # add the chunks just before/after each hit from the same section
+context_chars: 12000         # budget for all source text sent to the model
+refine_strips: true          # with the reranker: drop irrelevant sentences inside chunks (prose only)
+strip_min_score: 0.01
+
+# ---- Agentic RAG ----
+# "auto" turns these on for 4B+ chat models and keeps them cheap/off for 3B and smaller
+# (llama3.2), which are unreliable as planners and judges.
+router: auto                 # auto | llm | heuristic | off: split comparisons / multi-part questions
+max_sub_queries: 3
+iterate: auto                # auto | on | off: extra search rounds while evidence is missing
+max_rounds: 2                # total search rounds for multi-part questions (max 3)
+max_context_chunks: 8
+agent_mode: false            # experimental: the model drives read-only search/read tools (try qwen3:8b)
+agent_max_steps: 6
+
+# ---- Answer verification ----
+verify: auto                 # auto | llm | minicheck | off: check each sentence against the sources
+verify_model: bespoke-minicheck   # for verify: minicheck (ollama pull bespoke-minicheck; CC BY-NC licence)
+verify_regenerate: true      # rewrite once if too many sentences are unsupported
+verify_threshold: 0.34
+
+# ---- Web search fallback (off) ----
+# When on, a "not found" answer offers a button to search the web. Nothing is sent until you
+# click it, and only the query shown on the button is sent, to your own SearXNG instance.
+web_search: false
+searxng_url: ""              # e.g. http://localhost:8080 (enable the json format in SearXNG settings)
+web_max_results: 3
+
 # ---- Chat ----
 rewrite_queries: true    # rewrite follow-up questions into standalone search queries
 history_turns: 6
+save_chats: true         # keep conversations in rag_data/chats.sqlite
 log_queries: true        # writes rag_data/queries.jsonl (question, retrieved chunks, scores, answer)
 
 # ---- Auto-update ----
