@@ -154,7 +154,11 @@ function stepText(s) {
     case 'round': return `Round ${s.n}: missing ${s.missing || '?'} → "${s.query}", ${s.new_chunks} new`;
     case 'sufficient': return `Round ${s.n}: evidence is sufficient`;
     case 'refine': return `Trimmed ${s.dropped} irrelevant sentence group${s.dropped === 1 ? '' : 's'} (kept ${s.kept})`;
-    case 'tool': return `Tool ${s.n}: ${s.tool}(${Object.values(s.args || {}).join(', ')})${s.ok ? '' : ' — refused/failed'}`;
+    case 'agent': return `Agent: first search was ${s.grade} — deciding what else to look up`;
+    case 'tool': return s.tool === 'finish' ? `Agent finished${s.args && s.args.reason ? ': ' + s.args.reason : ''}`
+      : `Tool ${s.n}: ${s.tool}(${Object.values(s.args || {}).join(', ')})${s.ok ? '' : ' — refused/failed'}${s.grade ? ' → ' + s.grade : ''}`;
+    case 'agent_done': return `Agent: ${s.steps} step${s.steps === 1 ? '' : 's'}, ${s.evidence} source${s.evidence === 1 ? '' : 's'}, overall ${s.grade} (${s.reason})`;
+    case 'recheck': return s.new_chunks ? `Self-check: searched for ${s.queries.length} unsupported statement${s.queries.length === 1 ? '' : 's'}, ${s.new_chunks} new source${s.new_chunks === 1 ? '' : 's'}` : 'Self-check: no further sources for the unsupported statements';
     case 'verify': return `Checking the answer against the sources (${s.backend})`;
     case 'fallback': return `Fallback: ${s.reason}`;
     case 'web': return `Web search: "${s.query}"`;

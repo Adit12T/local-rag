@@ -33,12 +33,20 @@ Chat with the files in folders you choose. Everything runs on your machine
 - **Query planning**: simple questions use a heuristic route; comparisons and multi-part questions are
   split into up to `max_sub_queries` sub-queries (structured output, with a heuristic fallback). Small
   chat models (3B and below, e.g. `llama3.2`) keep the LLM planner and verifier off under `auto`.
-- **Iterative retrieval**: after retrieval the model judges whether the evidence is sufficient; if not,
-  it searches again for what is missing, up to `max_rounds`, and stops as soon as a round adds nothing.
-- **Optional tool agent** (`agent_mode: true`, experimental): the model may call read-only tools
-  (`search`, `keyword_search`, `read_file`, `list_folder`) for up to `agent_max_steps` steps. Tools are
-  limited to your configured folders, and the agent only collects sources; the answer is still written
-  by the normal grounded prompt.
+- **Agentic RAG** (`agent_mode: auto`, the default): after the first graded search, the chat model
+  decides what else it needs. It can call read-only tools (`search`, `keyword_search`, `read_file`,
+  `list_folder`) and calls `finish` when it has enough, for up to `agent_max_steps` steps. It sees the
+  first search's results and grade, and the sub-questions from the planner.
+  - Tools are limited to your configured folders and to the folder and file-type filters set in the UI.
+  - The "not found" decision comes from the grades of the searches only. A file the agent read does not
+    make an unrelated question answerable.
+  - The agent only collects sources; the answer is still written by the normal grounded prompt.
+  - `auto` turns the agent on unless the chat model is 3B or smaller. If the model cannot call tools,
+    the app falls back to the standard pipeline and stops trying.
+- **Iterative retrieval** (when the agent is off): the model judges whether the evidence is sufficient;
+  if not, it searches again for what is missing, up to `max_rounds`, and stops when a round adds nothing.
+- **Self-correction** (`self_correct: true`): when verification finds unsupported statements, the app
+  searches for each of them (up to 3), adds what it finds to the sources, and rewrites the answer once.
 
 **Answer verification**
 - Each answer sentence is checked against the sources it cites: unsupported sentences and wrong
@@ -159,13 +167,15 @@ question ──(history?)──> rewrite to standalone query ──> plan (simpl
                     │ incorrect → "not found" + closest matches (model not called)
                     │ ambiguous → one retry (alternative query, HyDE if on)
                                               │
-                 sufficient? ── no ──> search for what is missing (max_rounds)
-                                              │ yes
+                 agent (default): search / read_file / list_folder ... finish
+                 (agent off: sufficient? ── no ──> search for what is missing)
+                                              │
                  neighbours + refined strips, cap per file, context budget
                                               │
                  answer with [n] citations (streamed)
                                               │
-                 verify each sentence against its sources ── problems ──> one rewrite
+                 verify each sentence against its sources
+                    │ problems → search for the unsupported statements → one rewrite
 ```
 
 Each step is shown in the UI under "Steps", and the verification result under the answer.
@@ -229,7 +239,10 @@ number to set the "not found" threshold below.
   default thresholds still need checking on your own files and questions (`python -m rag.eval --answers`).
 - `bespoke-minicheck` is licensed CC BY-NC (non-commercial only), so it is never chosen automatically.
   For a dedicated checker you can use commercially, choose `verify: guardian` (Granite Guardian, Apache 2.0).
-- The agent mode and LLM planner need a capable chat model (qwen3:4b or larger is a reasonable start).
+- The agent and the LLM planner need a chat model that can call tools well (qwen3:4b or larger is a
+  reasonable start). With the default `llama3.2` (3B), `agent_mode: auto` keeps the agent off. Set
+  `agent_mode: on` to force it.
+- The agent adds model calls: about one per tool step (up to `agent_max_steps`) before the answer.
 - Unquoted `on`/`off` in YAML are read as booleans; the loader maps them back to the mode names.
 - Without the OCR packages, scanned PDFs show up in Activity as "no extractable text". OCR covers
   PDFs only (not standalone image files) and is slow on large scans (roughly a second or more per page on CPU).
@@ -245,7 +258,7 @@ python -m pytest -q tests
 ```
 
 `tests/test_rag.py` covers chunking, indexing, hybrid search, the watcher, the API and the security
-checks. `tests/test_pipeline.py` covers grading, retries, planning, iteration, the agent's path
+checks. `tests/test_pipeline.py` covers grading, retries, planning, iteration, self-correction, the agent's path
 limits, verification, web search and the API limits. `tests/test_docker_config.py` covers the Docker
 settings: `RAG_*` overrides and the polling watcher. All of them run against fakes (no Ollama needed).
 To exercise the whole app against the stand-in model:
@@ -276,7 +289,7 @@ rag/watcher.py         file watcher, debounce, periodic rescan
 rag/server.py          FastAPI app: chat, query rewriting, security, query log
 rag/pipeline.py        traditional, corrective and agentic flow (grading, planning, iteration, context)
 rag/verify.py          sentence-level answer verification and citation checks
-rag/agent.py           experimental read-only tool agent (path-bounded)
+rag/agent.py           agentic retrieval: read-only, path- and filter-bounded tools
 rag/websearch.py       opt-in SearXNG client
 rag/eval.py            golden-set retrieval and answer evaluation
 rag/static/index.html  chat UI

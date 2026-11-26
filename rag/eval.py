@@ -106,7 +106,7 @@ def run_answers(pipeline: Pipeline, golden: list[dict]) -> dict:
 
 def plain(cfg):
     """The same settings with every corrective / agentic / verification feature off."""
-    return dataclasses.replace(cfg, corrective=False, router="off", iterate="off", verify="off", agent_mode=False,
+    return dataclasses.replace(cfg, corrective=False, router="off", iterate="off", verify="off", agent_mode="off", self_correct=False,
                                expand_neighbors=0, refine_strips=False, hyde=False)
 
 
