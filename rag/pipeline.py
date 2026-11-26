@@ -16,7 +16,7 @@ import logging
 import re
 import time
 
-from .agent import Agent
+from .agent import GRADES, Agent
 from .loaders import CODE, SEP
 from .verify import Verifier
 from . import websearch
@@ -83,6 +83,13 @@ SUFFICIENT_SCHEMA = {
                    "next_query": {"type": "string"}},
     "required": ["sufficient", "missing", "next_query"],
 }
+RECHECK_PROMPT = (
+    "Your previous answer contained statements the sources do not support:\n{problems}\n\n"
+    "More sources were found for those statements and added at the end of the list. Rewrite the answer "
+    "using only what the sources state, with [n] citations. Keep a statement only if a source supports "
+    "it; drop the rest. If the sources do not answer the question, say so."
+)
+
 REVISE_PROMPT = (
     "Your previous answer contained statements the sources do not support:\n{problems}\n\n"
     "Rewrite the answer using only what the sources state, with [n] citations. Drop anything "
@@ -168,7 +175,8 @@ class Pipeline:
         self.iterate = cfg.iterate == "on" or (cfg.iterate == "auto" and not small)
         backend = {"auto": "off" if small else "llm"}.get(cfg.verify, cfg.verify)
         self.verifier = None if backend == "off" else Verifier(backend, llm, cfg.verify_model)
-        self.agent = Agent(indexer) if cfg.agent_mode else None
+        mode = {True: "on", False: "off"}.get(cfg.agent_mode, cfg.agent_mode)
+        self.agent = Agent(indexer) if mode == "on" or (mode == "auto" and not small) else None
 
     def settings(self) -> dict:
         return {"router": self.router, "iterate": self.iterate, "corrective": self.cfg.corrective,
@@ -296,6 +304,22 @@ class Pipeline:
             hits = (hits + new)[: self.cfg.max_context_chunks]
         return hits
 
+    def _recheck(self, verification, hits, filters, limit=3) -> list[tuple[str, list[dict]]]:
+        """Self-correction: search for each unsupported statement; return (query, new chunks) pairs."""
+        have = {h["id"] for h in hits}
+        claims = [re.sub(r"\s*\[\d+(?:,\s*\d+)*\]", "", seg["t"]).strip()
+                  for seg in verification.get("segments", []) if seg.get("s") is False]
+        out = []
+        for claim in list(dict.fromkeys(c for c in claims if c))[:limit]:
+            result = self.indexer.search(claim[:300], k=2, **filters)
+            if result["grade"] == "incorrect":
+                continue
+            new = [h for h in result["hits"] if h["id"] not in have][:2]
+            have.update(h["id"] for h in new)
+            if new:
+                out.append((claim[:300], new))
+        return out
+
     # ---------- context shaping ----------
 
     def _expand(self, hits):
@@ -414,42 +438,54 @@ class Pipeline:
             yield {"type": "step", "stage": "route", "route": plan["route"], "query": plan["query"],
                    "sub_queries": plan["sub_queries"], "how": plan["how"]}
             hits, grade, best = [], "incorrect", 0.0
-            if self.agent:
-                gen = self.agent.gather(plan["query"], llm, self.cfg.agent_max_steps)
+            # First, the graded search (traditional + corrective); the agent starts from it.
+            if plan["sub_queries"]:
+                per = max(2, self.cfg.top_k // len(plan["sub_queries"]) + 1)
+                groups, grades = [], []
+                for sq in plan["sub_queries"]:
+                    r = self._retrieve(sq, filters, llm, events, k=per)
+                    yield from flush()
+                    grades.append(r)
+                    if r["grade"] != "incorrect":
+                        groups.append(r["hits"])
+                hits = self._merge(groups, self.cfg.max_context_chunks)
+                good = [r for r in grades if r["grade"] != "incorrect"]
+                best = max((r["best"] for r in grades), default=0.0)
+                grade = ("correct" if all(r["grade"] == "correct" for r in grades)
+                         else "ambiguous" if good else "incorrect")
+            else:
+                r = self._retrieve(plan["query"], filters, llm, events)
+                yield from flush()
+                hits, grade, best = r["hits"], r["grade"], r["best"]
+            agent = self.agent
+            if agent:
+                yield {"type": "step", "stage": "agent", "grade": grade, "best": round(best, 3)}
+                gen = agent.gather(plan["query"], llm, self.cfg.agent_max_steps, filters,
+                                   {"hits": hits if grade != "incorrect" else [], "grade": grade},
+                                   plan["sub_queries"])
                 try:
                     while True:
                         yield next(gen)
                 except StopIteration as stop:
-                    hits = stop.value or []
+                    out = stop.value or {}
+                    found = out.get("trace", [])
+                    # The grade comes from searches only: a file the agent read does not by itself
+                    # make an unrelated question answerable.
+                    grade = max([grade] + [t["grade"] for t in found], key=lambda g: GRADES[g])
+                    best = max([best] + [t["best"] for t in found])
+                    hits = out.get("hits") or hits
+                    yield {"type": "step", "stage": "agent_done", "steps": out.get("steps", 0),
+                           "evidence": len(hits), "grade": grade, "reason": out.get("finished", "")}
                 except Exception as e:
                     log.warning("Agent failed, using the standard pipeline: %s", e)
                     yield {"type": "step", "stage": "fallback", "reason": f"agent failed: {str(e)[:120]}"}
-                    hits = []
+                    if "does not support tools" in str(e):
+                        self.agent = None  # this chat model cannot call tools: stop trying
+                    agent = None
                 hits = hits[: self.cfg.max_context_chunks]
-                if hits:
-                    grade = "correct"
-            if not hits:
-                if plan["sub_queries"]:
-                    per = max(2, self.cfg.top_k // len(plan["sub_queries"]) + 1)
-                    groups, grades = [], []
-                    for sq in plan["sub_queries"]:
-                        r = self._retrieve(sq, filters, llm, events, k=per)
-                        yield from flush()
-                        grades.append(r)
-                        if r["grade"] != "incorrect":
-                            groups.append(r["hits"])
-                    hits = self._merge(groups, self.cfg.max_context_chunks)
-                    good = [r for r in grades if r["grade"] != "incorrect"]
-                    best = max((r["best"] for r in grades), default=0.0)
-                    grade = ("correct" if all(r["grade"] == "correct" for r in grades)
-                             else "ambiguous" if good else "incorrect")
-                else:
-                    r = self._retrieve(plan["query"], filters, llm, events)
-                    yield from flush()
-                    hits, grade, best = r["hits"], r["grade"], r["best"]
-                if grade != "incorrect" and self.iterate and plan["route"] in ("multi_hop", "comparative"):
-                    hits = self._iterate(question, hits, filters, llm, events)
-                    yield from flush()
+            if not agent and grade != "incorrect" and self.iterate and plan["route"] in ("multi_hop", "comparative"):
+                hits = self._iterate(question, hits, filters, llm, events)
+                yield from flush()
 
         closest = []
         if grade == "incorrect":
@@ -493,6 +529,18 @@ class Pipeline:
                     if self.cfg.verify_regenerate and share > self.cfg.verify_threshold:
                         problems = "\n".join(f"- {p[:300]}" for p in verification["problems"][:8])
                         extra = REVISE_PROMPT.format(problems=problems)
+                        if self.cfg.self_correct and not web_query:
+                            more = self._recheck(verification, hits, filters)
+                            if more:
+                                yield {"type": "step", "stage": "recheck", "queries": [q for q, _ in more],
+                                       "new_chunks": sum(len(n) for _, n in more)}
+                                hits = hits + [h for _, n in more for h in n]
+                                sources = self.sources_payload(hits)
+                                yield {"type": "sources", "query": plan["query"], "abstain": False, "grade": grade,
+                                       "route": plan["route"], "sources": sources}
+                                extra = RECHECK_PROMPT.format(problems=problems)
+                            else:
+                                yield {"type": "step", "stage": "recheck", "queries": [], "new_chunks": 0}
                         revision = "".join(llm.chat_stream(self._messages(question, history, hits, extra)))
                         if revision.strip():
                             answer, revised = revision, True

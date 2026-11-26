@@ -284,6 +284,7 @@ def test_heuristic_router_splits_comparisons_for_small_models(env):
 
 def test_llm_router_decomposes_and_iterates(env):
     llm, cfg = env["llm"], env["cfg"]
+    cfg.agent_mode = "off"  # fixed sufficiency rounds are the path without the agent
     q = "Which day do deploys happen, and where are invoices stored?"
     llm.plans[q] = {"query": q, "route": "multi_hop", "sub_queries": ["deploy day", "invoices stored"]}
     llm.sufficient = [{"sufficient": False, "missing": "rollback time", "next_query": "rollbacks container image tag"},
@@ -299,6 +300,7 @@ def test_llm_router_decomposes_and_iterates(env):
 
 def test_iteration_stops_without_progress(env):
     llm = env["llm"]
+    env["cfg"].agent_mode = "off"
     q = "compare deploy day and invoices"
     llm.plans[q] = {"query": q, "route": "comparative", "sub_queries": ["deploy day", "invoices"]}
     # keeps asking for the same thing it already has: must stop after one round, not loop
@@ -318,7 +320,7 @@ def test_planner_failure_falls_back(env):
 
 def test_agent_mode_is_read_only_and_path_bounded(env):
     llm, cfg, docs = env["llm"], env["cfg"], env["docs"]
-    cfg.agent_mode = True
+    cfg.agent_mode = "on"
     llm.tool_script = [
         [("search", {"query": "deploy schedule"})],
         [("read_file", {"path": f"{docs.name}/deploy.md", "section": "schedule"})],
@@ -342,7 +344,7 @@ def test_agent_mode_is_read_only_and_path_bounded(env):
 
 def test_agent_step_cap_and_failure_fallback(env):
     llm, cfg = env["llm"], env["cfg"]
-    cfg.agent_mode, cfg.agent_max_steps = True, 2
+    cfg.agent_mode, cfg.agent_max_steps = "on", 2
     llm.tool_script = [[("search", {"query": f"deploy {i}"})] for i in range(10)]
     events, _ = run(Pipeline(cfg, llm, env["ix"]), "When do deploys happen?")
     assert len(steps(events, "tool")) == 2
@@ -582,3 +584,111 @@ def test_source_attributes_cannot_close_the_tag():
     block = Pipeline.source_block(1, hit)
     assert block.count("<source") == 1 and block.count("</source>") == 1
     assert '"><source' not in block
+
+
+# ---------------------------------------------------------------- agentic RAG (default path)
+
+def test_agent_auto_is_on_for_capable_models_and_off_for_small(env):
+    cfg = env["cfg"]
+    assert cfg.agent_mode == "auto"
+    assert Pipeline(cfg, ScriptLLM("qwen3:8b"), env["ix"]).agent is not None
+    assert Pipeline(cfg, ScriptLLM("llama3.2"), env["ix"]).agent is None
+    cfg.agent_mode = "off"
+    assert Pipeline(cfg, ScriptLLM("qwen3:8b"), env["ix"]).agent is None
+    cfg.agent_mode = "on"
+    assert Pipeline(cfg, ScriptLLM("llama3.2"), env["ix"]).agent is not None
+
+
+def test_agent_starts_from_graded_search_and_adds_evidence(env):
+    llm, docs = env["llm"], env["docs"]
+    seen = []
+    script = [[("search", {"query": "invoices postgres"})],
+              [("read_file", {"path": f"{docs.name}/deploy.md", "section": "schedule"})],
+              [("finish", {"reason": "both parts covered"})],
+              [("search", {"query": "never reached"})]]
+
+    def chat_tools(messages, tools):
+        seen.append(messages)
+        if not script:
+            return {"content": "DONE"}
+        return {"content": "", "tool_calls": [{"function": {"name": n, "arguments": a}} for n, a in script.pop(0)]}
+    llm.chat_tools = chat_tools
+    events, result = run(Pipeline(env["cfg"], llm, env["ix"]), "When do deploys happen and where are invoices stored?")
+    first = seen[0][1]["content"]
+    assert "First search, graded" in first and "<tool_result>" in first  # agent sees the first search
+    tools = steps(events, "tool")
+    assert [t["tool"] for t in tools] == ["search", "read_file", "finish"]   # stops at finish
+    assert tools[0].get("grade") in ("correct", "ambiguous")
+    done = steps(events, "agent_done")[0]
+    assert done["steps"] == 3 and done["reason"] == "both parts covered"
+    assert {"deploy.md", "billing.md"} <= {s["name"] for s in result["sources"]}
+    assert "finish" in {t["function"]["name"] for t in __import__("rag.agent", fromlist=["TOOLS"]).TOOLS}
+
+
+def test_agent_reading_a_file_does_not_make_unrelated_questions_answerable(env):
+    llm, docs = env["llm"], env["docs"]
+    llm.tool_script = [[("search", {"query": "world cup winner"})],
+                       [("read_file", {"path": f"{docs.name}/kafka.md"})]]
+    events, result = run(Pipeline(env["cfg"], llm, env["ix"]), "Who won the 2030 football world cup final?")
+    assert result["abstain"] and result["grade"] == "incorrect"
+    assert not llm.prompts  # the answer model is never called
+    assert steps(events, "tool")[0]["ok"]  # search ran, but found nothing usable
+
+
+def test_agent_respects_ui_filters(env):
+    llm, docs = env["llm"], env["docs"]
+    llm.tool_script = [[("read_file", {"path": f"{docs.name}/kafka.md"})],
+                       [("search", {"query": "orders topic retention"})]]
+    events, result = run(Pipeline(env["cfg"], llm, env["ix"]), "When do deploys happen?", filters={"exts": [".java"]})
+    tools = steps(events, "tool")
+    assert tools[0]["ok"] is False  # .md is filtered out
+    assert all(s["name"].endswith(".java") for s in result["sources"])
+
+
+def test_model_without_tool_support_falls_back_and_stops_trying(env):
+    llm = env["llm"]
+    calls = []
+
+    def no_tools(messages, tools):
+        calls.append(1)
+        raise RuntimeError('Ollama error 400: {"error":"qwen2:7b does not support tools"}')
+    llm.chat_tools = no_tools
+    pipe = Pipeline(env["cfg"], llm, env["ix"])
+    events, result = run(pipe, "When do deploys happen?")
+    assert steps(events, "fallback") and result["sources"][0]["name"] == "deploy.md"
+    run(pipe, "When do deploys happen?")
+    assert len(calls) == 1 and pipe.agent is None
+
+
+def test_self_correction_searches_for_unsupported_claims(env):
+    llm = env["llm"]
+    env["cfg"].agent_mode = "off"
+
+    def answer(messages):
+        if "More sources were found" in messages[-1]["content"]:
+            return ("The orders topic keeps messages for seven days [1]. "
+                    "Rollbacks use the previous container image tag [2].")
+        return ("The orders topic keeps messages for seven days [1]. "
+                "Rollbacks use the previous container image tag and take about ten minutes [1].")
+    llm.answer = answer
+    events, result = run(Pipeline(env["cfg"], llm, env["ix"]), "how long does the orders topic keep messages")
+    recheck = steps(events, "recheck")
+    assert recheck and recheck[0]["new_chunks"] >= 1
+    assert len([e for e in events if e["type"] == "sources"]) == 2  # updated source list sent to the UI
+    assert "deploy.md" in {s["name"] for s in result["sources"]}
+    assert result["revised"]
+    final = [e for e in events if e["type"] == "verification"][-1]
+    assert final["checked"] >= 1
+
+
+def test_agent_mode_yaml_booleans_and_values(tmp_path):
+    from rag.config import load_config
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    f = tmp_path / "c.yaml"
+    for raw, want in (("on", "on"), ("off", "off"), ("auto", "auto"), ("true", "on")):
+        f.write_text(f"paths: [{docs}]\ndata_dir: {tmp_path / 'd'}\nagent_mode: {raw}\n")
+        assert load_config(str(f)).agent_mode == want
+    f.write_text(f"paths: [{docs}]\ndata_dir: {tmp_path / 'd'}\nagent_mode: sometimes\n")
+    with pytest.raises(SystemExit):
+        load_config(str(f))

@@ -56,8 +56,9 @@ class Config:
     iterate: str = "auto"                   # auto | on | off: extra retrieval rounds for multi-part questions
     max_rounds: int = 2
     max_context_chunks: int = 8
-    agent_mode: bool = False                # experimental: the model drives read-only search tools
+    agent_mode: str = "auto"                # auto (on unless the chat model is 3B or smaller) | on | off
     agent_max_steps: int = 6
+    self_correct: bool = True               # verification found unsupported claims: search for them, then rewrite
 
     # Answer verification
     verify: str = "auto"                    # auto | llm | guardian | minicheck | off
@@ -153,13 +154,13 @@ def load_config(path: str = "config.yaml") -> Config:
     if unknown:
         raise SystemExit(f"{path}: unknown setting(s): {', '.join(sorted(unknown))}")
     # YAML 1.1 reads an unquoted `on`/`off` as a boolean; map it back to the mode string.
-    for name in ("rerank", "ocr", "iterate", "router", "verify"):
+    for name in ("rerank", "ocr", "iterate", "router", "verify", "agent_mode"):
         if isinstance(raw.get(name), bool):
             raw[name] = "on" if raw[name] else "off"
     cfg = Config(paths=paths, extensions=exts, ignore=ignore, **raw)
     if cfg.retrieval_mode not in ("hybrid", "dense", "keyword"):
         raise SystemExit("retrieval_mode must be hybrid, dense or keyword")
-    for name in ("rerank", "ocr", "iterate"):
+    for name in ("rerank", "ocr", "iterate", "agent_mode"):
         if getattr(cfg, name) not in ("auto", "on", "off"):
             raise SystemExit(f"{name} must be auto, on or off")
     if cfg.router not in ("auto", "llm", "heuristic", "off"):

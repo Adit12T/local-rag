@@ -19,7 +19,7 @@ max_file_mb: 20          # bigger files are skipped
 # ---- Ollama (everything runs on your machine) ----
 ollama_url: http://localhost:11434
 embed_model: nomic-embed-text   # task prefixes for nomic / mxbai / qwen3-embedding are applied automatically
-chat_model: llama3.2            # any chat model you have pulled; qwen3:4b or qwen3:8b unlock the agentic features
+chat_model: llama3.2            # any chat model you have pulled; qwen3:4b or qwen3:8b turn on agentic RAG (agent_mode: auto)
 num_ctx: 8192                   # context window sent to Ollama, so sources + history are not cut off
 temperature: 0.1
 
@@ -63,8 +63,10 @@ max_sub_queries: 3
 iterate: auto                # auto | on | off: extra search rounds while evidence is missing
 max_rounds: 2                # total search rounds for multi-part questions (max 3)
 max_context_chunks: 8
-agent_mode: false            # experimental: the model drives read-only search/read tools (try qwen3:8b)
+agent_mode: auto             # agentic RAG: the model picks read-only search/read/list tools until it has
+                             # enough evidence. auto = on unless the chat model is 3B or smaller | on | off
 agent_max_steps: 6
+self_correct: true           # after verification finds unsupported claims: search for them, then rewrite once
 
 # ---- Answer verification ----
 verify: auto                 # auto | llm | guardian | minicheck | off: check each sentence against the sources
