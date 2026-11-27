@@ -37,6 +37,7 @@ class Indexer:
         self.ocr = ocr
         self.embedder = embedder  # .embed_documents(list[str]), .embed_query(str), .signature
         self.reranker = reranker
+        self.upload_dir: Path | None = None  # set by the server when uploads are on
         cfg.data_dir.mkdir(parents=True, exist_ok=True)
         self.store = Store(cfg.data_dir / "index.sqlite")
         self.client = chromadb.PersistentClient(path=str(cfg.data_dir / "chroma"))
@@ -199,11 +200,11 @@ class Indexer:
 
     # ---------- retrieval ----------
 
-    def _dense(self, query: str, n: int, roots, exts) -> list[dict]:
+    def _dense(self, query: str, n: int, roots, exts, files=None) -> list[dict]:
         total = self.col.count()
         if total == 0:
             return []
-        conds = [{f: {"$in": v}} for f, v in (("root", roots), ("ext", exts)) if v]
+        conds = [{f: {"$in": v}} for f, v in (("root", roots), ("ext", exts), ("source", files)) if v]
         where = None if not conds else conds[0] if len(conds) == 1 else {"$and": conds}
         res = self.col.query(query_embeddings=[self.embedder.embed_query(query)], n_results=min(n, total), where=where)
         return [
@@ -214,7 +215,8 @@ class Indexer:
 
     def search(self, query: str, k: int | None = None, roots: list[str] | None = None,
                exts: list[str] | None = None, mode: str | None = None, rerank: bool = True,
-               extra_queries: list[str] | None = None, dense_texts: list[str] | None = None) -> dict:
+               extra_queries: list[str] | None = None, dense_texts: list[str] | None = None,
+               files: list[str] | None = None) -> dict:
         """Hybrid search for `query` (plus any alternative phrasings), graded CRAG-style.
 
         Every query contributes a dense and a keyword ranking; `dense_texts` (e.g. a HyDE passage)
@@ -231,15 +233,15 @@ class Indexer:
         rankings, dense_n, keyword_n, keyword_hit = [], 0, 0, False
         for q in queries:
             if mode != "keyword":
-                rankings.append(self._dense(q, cfg.candidates, roots, exts))
+                rankings.append(self._dense(q, cfg.candidates, roots, exts, files))
                 dense_n += len(rankings[-1])
             if mode != "dense":
-                rankings.append(self.store.keyword_search(q, cfg.candidates, roots, exts))
+                rankings.append(self.store.keyword_search(q, cfg.candidates, roots, exts, files))
                 keyword_n += len(rankings[-1])
                 keyword_hit = keyword_hit or bool(rankings[-1])
         if mode != "keyword":
             for text in dense_texts or []:
-                rankings.append(self._dense(text, cfg.candidates, roots, exts))
+                rankings.append(self._dense(text, cfg.candidates, roots, exts, files))
 
         # Reciprocal rank fusion: score = sum over rankings of 1 / (rrf_k + rank)
         pool: dict[str, dict] = {}
@@ -273,8 +275,10 @@ class Indexer:
                 grade = "correct" if best >= cfg.crag_correct_dense else "ambiguous"
 
         hits, per_file = [], {}
-        for hit in ranked:  # diversity: at most max_per_file chunks from one file
-            if per_file.get(hit["source"], 0) < cfg.max_per_file:
+        # diversity: at most max_per_file chunks from one file, unless the user picked a few documents
+        cap = k if files and len(files) <= 3 else cfg.max_per_file
+        for hit in ranked:
+            if per_file.get(hit["source"], 0) < cap:
                 per_file[hit["source"]] = per_file.get(hit["source"], 0) + 1
                 hit["rrf"] = round(hit["rrf"], 4)
                 hit["score"] = hit.get("rerank", hit["rrf"])
@@ -312,6 +316,32 @@ class Indexer:
         return before, after
 
     # ---------- status ----------
+
+    def documents(self) -> list[dict]:
+        """Every indexed file, for the document picker."""
+        out = []
+        for path, size, mtime, chunks, indexed_at in self.store.documents():
+            root = self._root_of(path)
+            if root is None:
+                continue
+            out.append({"path": path, "name": Path(path).name, "size": size, "mtime": mtime, "chunks": chunks,
+                        "indexed_at": indexed_at, "folder": root.name,
+                        "uploaded": bool(self.upload_dir and _is_under(path, str(self.upload_dir)))})
+        return out
+
+    def overview(self, path: str, n: int) -> list[dict]:
+        """Up to n chunks spread evenly over one file (always its start and end), in order.
+        Used for "summarize this document", where a search for the question words finds nothing useful."""
+        total = next((row[3] for row in self.store.documents() if row[0] == path), 0)
+        if not total:
+            return []
+        n = max(1, min(n, total))
+        picks = sorted({round(i * (total - 1) / (n - 1)) for i in range(n)}) if n > 1 else [0]
+        prefix = hashlib.sha1(path.encode()).hexdigest()[:20]
+        res = self.col.get(ids=[f"{prefix}:{i}" for i in picks], include=["documents", "metadatas"])
+        rows = sorted(zip(res["ids"], res["documents"], res["metadatas"]), key=lambda r: r[2]["chunk"])
+        return [{"id": i, "text": doc, "source": m["source"], "name": m["name"], "heading": m.get("heading", ""),
+                 "chunk": m["chunk"], "score": 0.0, "query": "", "overview": True} for i, doc, m in rows]
 
     def _event(self, action: str, path: str, detail: str = ""):
         self.events.appendleft({"time": time.time(), "action": action, "path": path, "detail": detail})

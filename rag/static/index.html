@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Local RAG</title>
+<title>Local RAG · chat with your documents</title>
 <link rel="icon" href="data:,">
 <style>
   :root { --bg:#f6f5f1; --panel:#fff; --ink:#1d1d1b; --muted:#6d6b65; --line:#e2dfd6; --accent:#1f5f4a; --user:#e7efe9; }
@@ -51,6 +51,24 @@
   .vnote { display:block; font-size:12px; color:var(--muted); margin-top:8px; white-space:normal; }
   .webbtn { margin-top:10px; font-size:13px; }
   .tag { font-size:11px; border:1px solid var(--line); border-radius:6px; padding:0 5px; margin-left:4px; }
+  #docs { display:none; border-bottom:1px solid var(--line); background:var(--panel); padding:8px 16px;
+          font-size:13px; max-height:40dvh; overflow:auto; }
+  #docs.open { display:block; }
+  #docs .bar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:6px; }
+  #docs .bar input[type=search] { font:inherit; padding:5px 8px; border:1px solid var(--line); border-radius:8px;
+          background:var(--bg); color:var(--ink); }
+  #docs label { display:flex; gap:8px; align-items:center; padding:3px 0; overflow-wrap:anywhere; }
+  #docs label small { color:var(--muted); }
+  #docs .x { margin-left:auto; padding:1px 7px; font-size:12px; }
+  #scope { display:none; max-width:780px; margin:0 auto 8px; font-size:13px; color:var(--muted);
+           gap:6px; align-items:center; flex-wrap:wrap; }
+  #scope.on { display:flex; }
+  #scope b { color:var(--ink); font-weight:600; }
+  #scope button { font-size:12px; padding:2px 8px; }
+  #drop { display:none; position:fixed; inset:0; background:color-mix(in srgb, var(--accent) 18%, transparent);
+          border:3px dashed var(--accent); z-index:9; align-items:center; justify-content:center;
+          font-size:20px; color:var(--ink); pointer-events:none; }
+  #drop.on { display:flex; }
   textarea { flex:1; font:inherit; color:var(--ink); background:var(--bg); border:1px solid var(--line);
              border-radius:10px; padding:9px 12px; resize:none; height:44px; }
 </style>
@@ -61,6 +79,7 @@
   <span id="stat"><span class="dot"></span>connecting…</span>
   <select id="fRoot" aria-label="Folder filter"><option value="">All folders</option></select>
   <select id="fExt" aria-label="File type filter"><option value="">All types</option></select>
+  <button id="docBtn" type="button">Documents</button>
   <button id="actBtn" type="button">Activity</button>
   <button id="rescan" type="button">Rescan</button>
   <select id="chats" aria-label="Saved chats"><option value="">Saved chats</option></select>
@@ -68,8 +87,19 @@
   <button id="del" type="button" hidden>Delete</button>
 </header>
 <div id="activity"></div>
+<div id="docs">
+  <div class="bar">
+    <button id="upBtn" type="button" class="primary">Upload documents</button>
+    <input id="upFile" type="file" multiple hidden>
+    <span id="upNote"></span>
+    <input id="docFind" type="search" placeholder="Find a document" aria-label="Find a document">
+    <button id="docNone" type="button">Clear selection</button>
+  </div>
+  <div id="docList"></div>
+</div>
+<div id="drop">Drop documents to upload them</div>
 <main><div class="wrap" id="chat"></div></main>
-<form id="form"><div class="wrap">
+<form id="form"><div id="scope"></div><div class="wrap">
   <textarea id="q" placeholder="Ask about your files…" autofocus></textarea>
   <button class="primary" id="send">Send</button>
 </div></form>
@@ -77,7 +107,9 @@
 const $ = id => document.getElementById(id);
 const chat = $('chat');
 let history = [], conversationId = null;
-const HINT = 'Ask anything about the files in your allowed folders.\nEdits, new files and deletions are picked up automatically.';
+const HINT = 'Ask anything about the files in your allowed folders, or upload documents and chat with them.\n' +
+  'Drop files here or use Documents. Edits, new files and deletions are picked up automatically.';
+let docs = [], selected = new Set(), docInfo = {uploads: false, extensions: [], max_mb: 20};
 
 function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text) e.textContent = text; return e; }
 function reset() { history = []; conversationId = null; $('chats').value = ''; $('del').hidden = true; chat.textContent = ''; const h = el('p', 'hint', HINT); h.style.whiteSpace = 'pre-line'; chat.append(h); }
@@ -106,12 +138,14 @@ function fill(select, values, label, show) {
   select.value = values.includes(current) ? current : '';
 }
 
+let lastFiles = -1;
 async function refresh() {
   try {
     const s = await (await api('/api/status')).json();
     const stat = $('stat'); stat.textContent = '';
     stat.append(el('span', 'dot' + (s.busy ? ' busy' : '')),
       `${s.files} files · ${s.chunks} chunks · ${s.mode}${s.reranker ? ' + rerank' : ''}` + (s.busy ? ' · indexing…' : ''));
+    if (s.files !== lastFiles) { lastFiles = s.files; loadDocs(); }
     const failed = s.events.filter(e => e.action === 'error').length;
     if (failed) stat.append(el('span', 'err', ` · ${failed} file${failed > 1 ? 's' : ''} failed to index, see Activity`));
     fill($('fRoot'), s.paths, 'All folders', p => p.split(/[\\/]/).filter(Boolean).pop());
@@ -129,6 +163,109 @@ setInterval(refresh, 4000); refresh();
 $('actBtn').onclick = () => $('activity').classList.toggle('open');
 $('rescan').onclick = async () => { await api('/api/rescan', {method:'POST'}); refresh(); };
 $('clear').onclick = reset;
+
+// ---------- documents: upload, pick, chat with the selected ones ----------
+function fmtSize(n) { return n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB'; }
+
+async function loadDocs() {
+  try {
+    docInfo = await (await api('/api/documents')).json();
+    docs = docInfo.documents;
+    const known = new Set(docs.map(d => d.path));
+    for (const p of [...selected]) if (!known.has(p)) selected.delete(p);
+    $('upBtn').hidden = !docInfo.uploads;
+    $('upFile').accept = docInfo.extensions.join(',');
+    renderDocs(); renderScope();
+  } catch {}
+}
+
+function renderDocs() {
+  const list = $('docList'), find = $('docFind').value.trim().toLowerCase();
+  list.textContent = '';
+  const shown = docs.filter(d => !find || d.name.toLowerCase().includes(find) || d.folder.toLowerCase().includes(find));
+  if (!docs.length) list.append(el('div', '', docInfo.uploads ? 'No documents yet. Upload some, or drop them anywhere on the page.' : 'No documents indexed yet.'));
+  for (const d of shown.slice(0, 300)) {
+    const row = el('label'), box = el('input');
+    box.type = 'checkbox'; box.checked = selected.has(d.path);
+    box.onchange = () => { box.checked ? selected.add(d.path) : selected.delete(d.path); renderScope(); };
+    row.append(box, el('span', '', d.name), el('small', '', `${d.uploaded ? 'uploaded' : d.folder} · ${fmtSize(d.size)} · ${d.chunks} chunks`));
+    if (d.uploaded) {
+      const x = el('button', 'x', 'Delete'); x.type = 'button'; x.title = 'Delete this uploaded document';
+      x.onclick = async e => {
+        e.preventDefault();
+        if (!confirm(`Delete ${d.name}? It is removed from the index and from rag_data/uploads.`)) return;
+        await api('/api/documents?path=' + encodeURIComponent(d.path), {method: 'DELETE'});
+        selected.delete(d.path); loadDocs(); refresh();
+      };
+      row.append(x);
+    }
+    list.append(row);
+  }
+  if (shown.length > 300) list.append(el('div', '', `…and ${shown.length - 300} more: type to find one.`));
+}
+
+function renderScope() {
+  const scope = $('scope'); scope.textContent = '';
+  const picked = docs.filter(d => selected.has(d.path));
+  scope.classList.toggle('on', picked.length > 0);
+  $('q').placeholder = picked.length ? `Ask about ${picked.length === 1 ? picked[0].name : picked.length + ' documents'}…` : 'Ask about your files…';
+  $('fRoot').disabled = $('fExt').disabled = picked.length > 0;
+  if (!picked.length) return;
+  const names = picked.slice(0, 3).map(d => d.name).join(', ') + (picked.length > 3 ? ` +${picked.length - 3} more` : '');
+  scope.append('Chatting with ', el('b', '', names));
+  for (const [label, q] of [['Summarize', 'Summarize this document.'], ['Key points', 'What are the key points?']]) {
+    const b = el('button', '', label); b.type = 'button';
+    b.onclick = () => ask(picked.length > 1 && label === 'Summarize' ? 'Summarize these documents.' : q);
+    scope.append(b);
+  }
+  const all = el('button', '', 'All files'); all.type = 'button'; all.title = 'Stop limiting the chat to these documents';
+  all.onclick = () => { selected.clear(); renderDocs(); renderScope(); };
+  scope.append(all);
+}
+
+async function upload(files) {
+  if (!docInfo.uploads || !files.length) return;
+  const form = new FormData();
+  for (const f of [...files].slice(0, 10)) form.append('files', f);
+  $('upNote').textContent = `Uploading and indexing ${Math.min(files.length, 10)} file${files.length > 1 ? 's' : ''}…`;
+  $('upBtn').disabled = true;
+  try {
+    const res = await api('/api/documents', {method: 'POST', body: form});
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || res.status);
+    const ok = data.results.filter(r => r.path && r.chunks), bad = data.results.filter(r => !(r.path && r.chunks));
+    if (ok.length) selected = new Set(ok.map(r => r.path));  // chat with what was just uploaded
+    const lines = ok.map(r => `${r.name}: ${r.chunks} chunks`);
+    lines.push(...bad.map(r => `${r.name}: ${r.detail || (r.status === 'skipped' ? 'could not be read' : 'no extractable text')}`));
+    $('upNote').textContent = lines.join(' · ');
+    chat.querySelector('.hint')?.remove();
+    const note = el('div', 'msg bot', (ok.length ? `Ready: ${ok.map(r => r.name).join(', ')}. Ask me anything about ${ok.length > 1 ? 'them' : 'it'}.` : 'Nothing was added.')
+      + (bad.length ? '\nNot added: ' + bad.map(r => r.name + ' (' + (r.detail || 'no extractable text') + ')').join(', ') : ''));
+    chat.append(note); note.scrollIntoView({block: 'end'});
+  } catch (e) {
+    $('upNote').textContent = 'Upload failed: ' + e.message;
+  } finally {
+    $('upBtn').disabled = false; $('upFile').value = '';
+    await loadDocs(); refresh();
+  }
+}
+
+$('docBtn').onclick = () => { $('docs').classList.toggle('open'); loadDocs(); };
+$('upBtn').onclick = () => $('upFile').click();
+$('upFile').onchange = () => upload($('upFile').files);
+$('docFind').oninput = renderDocs;
+$('docNone').onclick = () => { selected.clear(); renderDocs(); renderScope(); };
+let dragDepth = 0;
+const isFileDrag = e => [...(e.dataTransfer?.types || [])].includes('Files');
+document.addEventListener('dragenter', e => { if (isFileDrag(e) && docInfo.uploads) { dragDepth++; $('drop').classList.add('on'); } });
+document.addEventListener('dragleave', () => { if (--dragDepth <= 0) { dragDepth = 0; $('drop').classList.remove('on'); } });
+document.addEventListener('dragover', e => { if (isFileDrag(e)) e.preventDefault(); });
+document.addEventListener('drop', e => {
+  if (!isFileDrag(e)) return;
+  e.preventDefault(); dragDepth = 0; $('drop').classList.remove('on');
+  upload(e.dataTransfer.files);
+});
+loadDocs();
 
 function addSources(bot, sources, abstain) {
   if (!sources || !sources.length) return;
@@ -159,6 +296,7 @@ function stepText(s) {
       : `Tool ${s.n}: ${s.tool}(${Object.values(s.args || {}).join(', ')})${s.ok ? '' : ' — refused/failed'}${s.grade ? ' → ' + s.grade : ''}`;
     case 'agent_done': return `Agent: ${s.steps} step${s.steps === 1 ? '' : 's'}, ${s.evidence} source${s.evidence === 1 ? '' : 's'}, overall ${s.grade} (${s.reason})`;
     case 'recheck': return s.new_chunks ? `Self-check: searched for ${s.queries.length} unsupported statement${s.queries.length === 1 ? '' : 's'}, ${s.new_chunks} new source${s.new_chunks === 1 ? '' : 's'}` : 'Self-check: no further sources for the unsupported statements';
+    case 'overview': return `Overview: read ${s.chunks} passages spread over ${s.documents} document${s.documents === 1 ? '' : 's'}`;
     case 'verify': return `Checking the answer against the sources (${s.backend})`;
     case 'fallback': return `Fallback: ${s.reason}`;
     case 'web': return `Web search: "${s.query}"`;
@@ -255,7 +393,8 @@ async function ask(question, webQuery) {
   const bot = el('div', 'msg bot'), text = el('span', '', '…'); bot.append(text); chat.append(bot);
   bot.scrollIntoView({block: 'end'});
   let answer = '', sources = [], abstain = false, offer = null, verification = null;
-  const filters = {roots: $('fRoot').value ? [$('fRoot').value] : [], exts: $('fExt').value ? [$('fExt').value] : []};
+  const filters = selected.size ? {roots: [], exts: [], files: [...selected]}
+    : {roots: $('fRoot').value ? [$('fRoot').value] : [], exts: $('fExt').value ? [$('fExt').value] : []};
   try {
     const body = {question, history, filters, conversation_id: conversationId};
     if (webQuery) body.web_query = webQuery;

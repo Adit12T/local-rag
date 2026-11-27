@@ -1,7 +1,8 @@
 # Local RAG
 
-Chat with the files in folders you choose. Everything runs on your machine
-(Ollama + Chroma + SQLite), and the index updates itself when files change.
+Chat with your documents: upload them in the browser, or point the app at folders you choose.
+Everything runs on your machine (Ollama + Chroma + SQLite), and the index updates itself when
+files change.
 
 ## Features
 
@@ -65,6 +66,16 @@ Chat with the files in folders you choose. Everything runs on your machine
   so renames and restarts are cheap.
 - The keyword index and file manifest change in one transaction; an interrupted update is repaired on the next sync.
 
+**Document chat**
+- Upload documents in the chat (the **Documents** panel, or drop files anywhere on the page). They are
+  indexed at once and selected, so the next question is answered from them only.
+- Select one or more documents (uploaded or from your folders) to limit the chat to them. Clear the
+  selection, or click **All files**, to search everything again.
+- **Summarize** and **Key points** read passages spread over the whole selected document (start to end),
+  not only the passages that match the words of the question.
+- Uploaded files are kept in `rag_data/uploads` and can be deleted from the panel. Files in your folders
+  are never deleted by the app. Set `uploads: false` to turn uploads off.
+
 **Chat**
 - Conversations are saved (`rag_data/chats.sqlite`) and can be reopened or deleted from the UI.
   Set `save_chats: false` to keep nothing.
@@ -73,6 +84,8 @@ Chat with the files in folders you choose. Everything runs on your machine
 - Sources are passed to the model as delimited, untrusted data, with instructions not to follow anything written inside them.
 - Host-header check (blocks DNS-rebinding attacks on the localhost API), optional access token,
   and a refusal to listen on a non-loopback address without a token.
+- Same-origin check on every write request: a web page you visit cannot upload documents to this
+  server or send it questions.
 - Query log (`rag_data/queries.jsonl`) with the retrieved chunks and per-stage scores and timings.
 - `python -m rag.eval` measures hit@k and MRR per retrieval mode on your own questions.
 
@@ -183,7 +196,10 @@ Set `router`, `verify`, `iterate`, `corrective` or `agent_mode` in `config.yaml`
 
 ## How access works
 
-- Only the entries under `paths:` are read. Folders are read recursively.
+- Only the entries under `paths:` and the upload folder (`rag_data/uploads`) are read. Folders are
+  read recursively. With uploads on, `paths:` can be empty.
+- Uploads must have a type in `extensions:` and be at most `max_file_mb` (10 files per upload).
+  File names are cleaned (no folders, no hidden files), and a file never overwrites another.
 - Names in `ignore:` (`.git`, `node_modules`, `target`, ...) are skipped, as are
   file types not in `extensions:` and files over `max_file_mb`.
 - Removing a path from `config.yaml` removes its content from the index on the next start.
@@ -259,7 +275,8 @@ python -m pytest -q tests
 
 `tests/test_rag.py` covers chunking, indexing, hybrid search, the watcher, the API and the security
 checks. `tests/test_pipeline.py` covers grading, retries, planning, iteration, self-correction, the agent's path
-limits, verification, web search and the API limits. `tests/test_docker_config.py` covers the Docker
+limits, verification, web search and the API limits. `tests/test_documents.py` covers uploads, document
+selection, summaries, deletion and the upload safety checks. `tests/test_docker_config.py` covers the Docker
 settings: `RAG_*` overrides and the polling watcher. All of them run against fakes (no Ollama needed).
 To exercise the whole app against the stand-in model:
 `python tests/fake_ollama.py 11500` in one terminal, then point `ollama_url` at it and run `python -m rag`.
