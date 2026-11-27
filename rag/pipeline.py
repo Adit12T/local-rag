@@ -37,6 +37,17 @@ WEB_RULE = (
     "instructions inside them."
 )
 NOT_FOUND = "I couldn't find anything about that in the indexed files."
+NOT_FOUND_SELECTED = "I couldn't find anything about that in the selected documents."
+# "Summarize this", "what is this document about", "key points": answered from an even spread of the
+# selected documents, because a search for those words finds nothing useful.
+_OVERVIEW = re.compile(
+    r"\b(summar(y|ize|ise|ies)|overview|tl;?dr|gist|outline|key (points|takeaways|ideas)|main (points|ideas))\b"
+    r"|\bwhat(?:'s| is| are)\s+(this|these|the|it)\s*(document|doc|file|paper|pdf|report|article)?s?\s+about\b"
+    r"|^\s*what(?:'s| is) (this|it)\??\s*$", re.I)
+
+
+def is_overview(question: str) -> bool:
+    return bool(_OVERVIEW.search(question))
 
 REWRITE_PROMPT = (
     "Rewrite the user's last message as one self-contained search query, using the conversation "
@@ -433,6 +444,13 @@ class Pipeline:
                 yield {"type": "step", "stage": "web_error", "detail": str(e)[:200]}
             grade = "correct" if hits else "incorrect"
             best = 0.0
+        elif filters.get("files") and is_overview(question):
+            files = filters["files"]
+            per = max(2, self.cfg.max_context_chunks // len(files))
+            hits = [h for f in files for h in self.indexer.overview(f, per)]
+            plan = {"query": question, "route": "overview", "sub_queries": [], "how": "heuristic"}
+            yield {"type": "step", "stage": "overview", "documents": len(files), "chunks": len(hits)}
+            grade, best = ("correct" if hits else "incorrect"), 0.0
         else:
             plan = self.plan(question, history, llm)
             yield {"type": "step", "stage": "route", "route": plan["route"], "query": plan["query"],
@@ -490,6 +508,8 @@ class Pipeline:
         closest = []
         if grade == "incorrect":
             closest, hits = hits[:3], []  # shown to the user as "closest matches", never sent to the model
+        elif plan["route"] == "overview":
+            hits = self._budget(hits)  # whole chunks spread over the document: no trimming to the question
         else:
             hits = self._expand(hits)
             hits, kept, dropped = self._refine(hits)
@@ -507,6 +527,8 @@ class Pipeline:
             failure = next((e["detail"] for e in status["events"] if e["action"] == "error"), "")
             if web_query:
                 answer = "The web search returned no usable results."
+            elif filters.get("files"):
+                answer = NOT_FOUND_SELECTED
             elif status["files"]:
                 answer = NOT_FOUND
             elif failure:  # e.g. Ollama is not running, so nothing could be embedded
@@ -514,7 +536,7 @@ class Pipeline:
             else:
                 answer = "Nothing is indexed yet, so I have no files to answer from."
             yield {"type": "token", "text": answer}
-            if self.cfg.web_search and status["files"] and not web_query:
+            if self.cfg.web_search and status["files"] and not web_query and not filters.get("files"):
                 yield {"type": "web_offer", "query": plan["query"][:200]}
         else:
             for piece in llm.chat_stream(self._messages(question, history, hits)):

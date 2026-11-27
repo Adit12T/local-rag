@@ -87,6 +87,7 @@ web_max_results: 3
 rewrite_queries: true    # rewrite follow-up questions into standalone search queries
 history_turns: 6
 save_chats: true         # keep conversations in rag_data/chats.sqlite
+uploads: true            # upload documents in the chat UI (kept in rag_data/uploads, size limit max_file_mb)
 log_queries: true        # writes rag_data/queries.jsonl (question, retrieved chunks, scores, answer)
 
 # ---- Auto-update ----

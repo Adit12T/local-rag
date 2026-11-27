@@ -98,15 +98,21 @@ class Store:
 
     # ---------- keyword search ----------
 
+    def documents(self) -> list[tuple]:
+        """(path, size, mtime, chunks, indexed_at) for every fully indexed file."""
+        with self.lock:
+            return self.db.execute("SELECT path, size, mtime, chunks, indexed_at FROM files"
+                                   " WHERE pending=0 ORDER BY path").fetchall()
+
     def keyword_search(self, query: str, limit: int, roots: list[str] | None = None,
-                       exts: list[str] | None = None) -> list[dict]:
+                       exts: list[str] | None = None, files: list[str] | None = None) -> list[dict]:
         match = fts_query(query)
         if not self.fts or not match:
             return []
         sql = ("SELECT chunk_id, path, name, heading, ord, text, bm25(chunks_fts, 1.0, 2.0, 2.0) AS rank"
                " FROM chunks_fts WHERE chunks_fts MATCH ?")
         args: list = [match]
-        for column, values in (("root", roots), ("ext", exts)):
+        for column, values in (("root", roots), ("ext", exts), ("path", files)):
             if values:
                 sql += f" AND {column} IN ({','.join('?' * len(values))})"
                 args += values

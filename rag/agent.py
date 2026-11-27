@@ -92,7 +92,10 @@ class Agent:
         if roots and not any(real == Path(r) or Path(r) in real.parents for r in roots):
             return False
         exts = (filters or {}).get("exts")
-        return not (is_file and exts and real.suffix.lower() not in exts)
+        if is_file and exts and real.suffix.lower() not in exts:
+            return False
+        files = (filters or {}).get("files")
+        return not (is_file and files and str(real) not in files)
 
     def _allowed_dir(self, real: Path) -> bool:
         for root in self.cfg.paths:
@@ -116,7 +119,7 @@ class Agent:
         if ext:
             ext = ext if ext.startswith(".") else "." + ext
             exts = [ext] if not exts or ext in exts else exts
-        result = self.indexer.search(query, roots=roots, exts=exts, mode=mode)
+        result = self.indexer.search(query, roots=roots, exts=exts, mode=mode, files=(filters or {}).get("files"))
         if trace is not None:
             trace.append({"query": query, "grade": result["grade"], "best": result["best"]})
         if result["grade"] == "incorrect":

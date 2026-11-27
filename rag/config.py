@@ -76,6 +76,7 @@ class Config:
     history_turns: int = 6
     log_queries: bool = True
     save_chats: bool = True
+    uploads: bool = True                    # upload documents in the chat UI (stored in data_dir/uploads)
 
     # Auto-update
     debounce_seconds: float = 1.5
@@ -141,8 +142,8 @@ def load_config(path: str = "config.yaml") -> Config:
     raw = yaml.safe_load(Path(path).read_text()) or {}
     raw.update(env_overrides())
     paths = [Path(p).expanduser().resolve() for p in raw.pop("paths", None) or []]
-    if not paths:
-        raise SystemExit(f"{path}: add at least one entry under 'paths:'")
+    if not paths and raw.get("uploads") is False:
+        raise SystemExit(f"{path}: add at least one entry under 'paths:' (or turn on uploads)")
     missing = [str(p) for p in paths if not p.exists()]
     if missing:
         raise SystemExit("These paths in config.yaml do not exist:\n  " + "\n  ".join(missing))
